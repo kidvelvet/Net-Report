@@ -1,0 +1,33 @@
+# macOS
+.DS_Store
+
+# Build products
+/.build/
+/dist/
+*.o
+*.dSYM/
+
+# Xcode / SwiftPM local state (can embed absolute paths)
+.swiftpm/
+xcuserdata/
+*.xcuserstate
+
+# ---------------------------------------------------------------------------
+# Operator data — never commit. These hold real names, addresses, and call
+# signs of net participants, and the app writes them into whatever folder the
+# operator chooses (which may be this one).
+# ---------------------------------------------------------------------------
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.csv
+*.pdf
+Checkin List/
+Net Reports/
+
+# Credentials — the app uses the Keychain, but keep these out by reflex.
+.env
+*.pem
+*.p12
+secrets*
