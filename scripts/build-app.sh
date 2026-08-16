@@ -1,5 +1,23 @@
 #!/usr/bin/env bash
 #
+# Net Report - a macOS application for running a local amateur radio net.
+# Copyright (C) 2026  kidvelvet (W7SKW)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+#
 # Assemble a self-contained NetReport.app (Apple Silicon) from the release build.
 # NetReport links only system frameworks (SwiftUI, CoreGraphics, CoreText,
 # Foundation), so there is nothing to embed — we just wrap the binary in a
