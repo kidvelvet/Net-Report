@@ -63,6 +63,9 @@ struct NetReportApp: App {
                 .environment(fonts)
                 .frame(minWidth: 820, minHeight: 600)
                 .onAppear { AppDelegate.session = session }
+                // Red close button quits (with confirmation) rather than
+                // leaving the app running windowless in the Dock.
+                .background(WindowCloseInterceptor())
         }
         .commands {
             CommandGroup(after: .newItem) {
