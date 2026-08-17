@@ -255,6 +255,11 @@ public final class NetDatabase: SQLiteStore {
         return sqlite3_changes(db) > 0
     }
 
+    /// Replace the report log with a backup file's contents.
+    public func restore(from source: URL) throws {
+        try restore(from: source, requiringTable: "net_reports")
+    }
+
     // MARK: - Erase
 
     /// Delete all reports and reset first-run configuration (starting number and

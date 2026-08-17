@@ -95,6 +95,45 @@ public class SQLiteStore {
         }
     }
 
+    /// Replace this database's contents with those of a backup file — the
+    /// reverse of `backup(to:)`, done in place through SQLite's backup API so
+    /// the open connection stays valid.
+    ///
+    /// `requiringTable` is checked on the *source* first, so pointing at a
+    /// random file (or at the other database's backup) fails cleanly instead of
+    /// destroying the data already here.
+    public func restore(from source: URL, requiringTable table: String) throws {
+        var src: OpaquePointer?
+        guard sqlite3_open_v2(source.path, &src, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              src != nil else {
+            let message = src.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
+            sqlite3_close(src)
+            throw DatabaseError.open(message)
+        }
+        defer { sqlite3_close(src) }
+
+        // Validate before overwriting anything.
+        var check: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            src, "SELECT name FROM sqlite_master WHERE type='table' AND name = ?;",
+            -1, &check, nil) == SQLITE_OK else {
+            throw DatabaseError.sql("That file is not a readable SQLite database.")
+        }
+        sqlite3_bind_text(check, 1, table, -1, SQLITE_TRANSIENT)
+        let matches = sqlite3_step(check) == SQLITE_ROW
+        sqlite3_finalize(check)
+        guard matches else {
+            throw DatabaseError.sql("That database has no “\(table)” table, so it isn't a "
+                                    + "Net Report backup of this kind.")
+        }
+
+        guard let restore = sqlite3_backup_init(db, "main", src, "main") else {
+            throw lastError()
+        }
+        sqlite3_backup_step(restore, -1)
+        guard sqlite3_backup_finish(restore) == SQLITE_OK else { throw lastError() }
+    }
+
     // MARK: - Low-level helpers
 
     func exec(_ sql: String) throws {

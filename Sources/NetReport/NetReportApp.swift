@@ -18,8 +18,41 @@
 
 import SwiftUI
 
+/// Confirms before the app quits. Check-ins live in memory until a report is
+/// generated, so quitting mid-net would silently discard them — the prompt says
+/// so explicitly in that case.
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set by the app at launch so the prompt can describe what's at stake.
+    static weak var session: NetSession?
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let alert = NSAlert()
+        alert.messageText = "Quit Net Report?"
+
+        if let session = Self.session, session.netStarted, session.totalCheckins > 0 {
+            let n = session.totalCheckins
+            let reported = session.lastResult != nil
+            alert.alertStyle = reported ? .informational : .warning
+            alert.informativeText = reported
+                ? "A net is still open with \(n) check-in\(n == 1 ? "" : "s"). Your report has "
+                  + "already been saved; the check-in list itself is not kept after quitting."
+                : "A net is in progress with \(n) check-in\(n == 1 ? "" : "s") and no report "
+                  + "generated yet. Quitting now discards the check-in list — this cannot be undone."
+        } else {
+            alert.alertStyle = .informational
+            alert.informativeText = "Your databases and saved reports are already on disk."
+        }
+
+        alert.addButton(withTitle: "Quit")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn ? .terminateNow : .terminateCancel
+    }
+}
+
 @main
 struct NetReportApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var session = NetSession()
     @State private var fonts = FontSettings()
 
@@ -29,6 +62,7 @@ struct NetReportApp: App {
                 .environment(session)
                 .environment(fonts)
                 .frame(minWidth: 820, minHeight: 600)
+                .onAppear { AppDelegate.session = session }
         }
         .commands {
             CommandGroup(after: .newItem) {

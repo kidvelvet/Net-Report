@@ -213,6 +213,52 @@ final class NetSession {
         return importUserCSV(from: url)
     }
 
+    /// Panel + restore for a backed-up operator directory (`.sqlite`).
+    /// Returns the number of operators after restoring, or nil if cancelled.
+    @discardableResult
+    func importUserBackupInteractive() -> Int? {
+        guard let url = chooseBackupFile(kind: .operators) else { return nil }
+        do {
+            try userDatabase.restore(from: url)
+            refreshOperatorCount()
+            append(log: "Restored \(operatorCount) operator"
+                   + "\(operatorCount == 1 ? "" : "s") from \(url.lastPathComponent).")
+            return operatorCount
+        } catch {
+            errorMessage = "Could not import that backup: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Panel + restore for a backed-up report log (`.sqlite`).
+    @discardableResult
+    func importReportBackupInteractive() -> Int? {
+        guard let url = chooseBackupFile(kind: .reports) else { return nil }
+        do {
+            try database.restore(from: url)
+            refreshSetupState()
+            append(log: "Restored \(reportCount) net report"
+                   + "\(reportCount == 1 ? "" : "s") from \(url.lastPathComponent).")
+            return reportCount
+        } catch {
+            errorMessage = "Could not import that backup: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    private func chooseBackupFile(kind: DatabaseKind) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.allowedContentTypes = [UTType(filenameExtension: "sqlite") ?? .data]
+        panel.allowsOtherFileTypes = true
+        panel.message = "Choose a backed-up \(kind.rawValue.lowercased()) database "
+            + "(.sqlite). Its contents will replace what is here now."
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
     /// Panel + import for the net report log CSV. Returns rows imported.
     @discardableResult
     func importReportCSVInteractive() -> Int? {

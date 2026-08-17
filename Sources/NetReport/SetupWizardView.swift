@@ -304,13 +304,17 @@ private struct ImportStep: View {
                             Button("Import CSV…") {
                                 if session.importUserCSVInteractive() != nil { operatorsDone = true }
                             }
+                            Button("Import Backup Database…") {
+                                if session.importUserBackupInteractive() != nil { operatorsDone = true }
+                            }
                             Button("Start Empty") { operatorsDone = true }
                             if operatorsDone {
                                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
                             }
                         }
                         Text("CSV needs a header row with a call sign column; name, "
-                             + "nickname, city, county, state, and notes are optional.")
+                             + "nickname, city, county, state, and notes are optional. "
+                             + "A backup is a .sqlite file saved from Back Up…")
                             .font(.caption).foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -335,6 +339,9 @@ private struct ImportStep: View {
                         HStack {
                             Button("Import CSV…") {
                                 if session.importReportCSVInteractive() != nil { reportsDone = true }
+                            }
+                            Button("Import Backup Database…") {
+                                if session.importReportBackupInteractive() != nil { reportsDone = true }
                             }
                             Spacer()
                         }

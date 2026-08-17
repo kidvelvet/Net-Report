@@ -24,6 +24,7 @@ import NetReportKit
 struct AnnouncementsView: View {
     @Environment(NetSession.self) private var session
     @Environment(FontSettings.self) private var fonts
+    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         let size = fonts.cgSize(.activityLog)
@@ -73,6 +74,14 @@ struct AnnouncementsView: View {
                     .padding(12)
                 }
             }
+
+            Divider()
+            HStack {
+                Spacer()
+                Button("Close") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+            .padding(12)
         }
         .frame(minWidth: 420, minHeight: 300)
     }

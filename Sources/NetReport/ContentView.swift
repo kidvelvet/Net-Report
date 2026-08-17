@@ -51,12 +51,20 @@ struct ContentView: View {
                     .padding(12)
                     .frame(minWidth: 460)
 
-                    VStack(alignment: .leading, spacing: 12) {
+                    // VSplitView so the report panel and the activity log can be
+                    // sized against each other — during a net you want the log
+                    // large, while filling in the report you want the opposite.
+                    VSplitView {
                         ReportPanel()
+                            .padding(12)
+                            .frame(minHeight: 150)
                         ActivityLog()
+                            .padding(12)
+                            .frame(minHeight: 120)
                         DatabasePanel()
+                            .padding(12)
+                            .frame(minHeight: 90)
                     }
-                    .padding(12)
                     .frame(minWidth: 300)
                 }
             } else {

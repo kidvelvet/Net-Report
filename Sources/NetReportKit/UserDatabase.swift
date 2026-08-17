@@ -370,6 +370,11 @@ public final class UserDatabase: SQLiteStore {
         return sqlite3_changes(db) > 0
     }
 
+    /// Replace the operator directory with a backup file's contents.
+    public func restore(from source: URL) throws {
+        try restore(from: source, requiringTable: "users")
+    }
+
     public func eraseAll() throws {
         try exec("DELETE FROM users;")
         try? exec("VACUUM;")

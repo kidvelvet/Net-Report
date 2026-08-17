@@ -155,6 +155,52 @@ struct DatabaseTests {
         #expect(db.nextMessageNumber() == NetDatabase.maxAllowedMessageNumber)
     }
 
+    /// Round-trip: back up, erase, restore from the backup.
+    @Test func restoresFromBackupFile() throws {
+        let db = try newDB()
+        try db.appendReport(messageNumber: 12, userCallSign: "W7SKW", receivingStation: "W1AW",
+                            checkins: 21, trafficMessages: 2, pdfPath: "none")
+        let backupURL = tempDir().appendingPathComponent("reports-backup.sqlite")
+        try db.backup(to: backupURL)
+
+        try db.eraseAll()
+        #expect(db.isEmpty)
+
+        try db.restore(from: backupURL)
+        #expect(db.reportCount() == 1)
+        #expect(db.maxMessageNumber() == 12)
+        #expect(db.nextMessageNumber() == 13)
+        #expect(try db.allReports().first?.checkins == 21)
+    }
+
+    /// Picking the *operator* backup for the report log must fail cleanly and
+    /// leave the existing data untouched, rather than wiping it.
+    @Test func rejectsWrongKindOfBackupWithoutDataLoss() throws {
+        let reports = try newDB()
+        try reports.appendReport(messageNumber: 3, userCallSign: "W7SKW", receivingStation: "W1AW",
+                                 checkins: 8, trafficMessages: 0, pdfPath: "none")
+
+        // A perfectly valid database — of the wrong kind.
+        let users = try UserDatabase(path: tempDir().appendingPathComponent("u.sqlite").path)
+        let wrongURL = tempDir().appendingPathComponent("users-backup.sqlite")
+        try users.backup(to: wrongURL)
+
+        #expect(throws: DatabaseError.self) { try reports.restore(from: wrongURL) }
+        #expect(reports.reportCount() == 1)          // untouched
+        #expect(reports.maxMessageNumber() == 3)
+    }
+
+    @Test func rejectsNonDatabaseFileWithoutDataLoss() throws {
+        let db = try newDB()
+        try db.appendReport(messageNumber: 4, userCallSign: "W7SKW", receivingStation: "W1AW",
+                            checkins: 5, trafficMessages: 0, pdfPath: "none")
+        let junk = tempDir().appendingPathComponent("notadb.sqlite")
+        try "this is not a database".write(to: junk, atomically: true, encoding: .utf8)
+
+        #expect(throws: DatabaseError.self) { try db.restore(from: junk) }
+        #expect(db.reportCount() == 1)
+    }
+
     @Test func parsesQuotedCSVFields() {
         let fields = NetDatabase.parseCSVLine("1,\"Doe, John\",\"say \"\"hi\"\"\",x")
         #expect(fields == ["1", "Doe, John", "say \"hi\"", "x"])
@@ -335,6 +381,24 @@ struct UserDatabaseTests {
         try csv.write(to: url, atomically: true, encoding: .utf8)
         #expect(try db.importCSV(from: url) == 2)
         #expect(db.count() == 2)
+    }
+
+    /// The operator directory restores from its own backup, nicknames and
+    /// persistent notes intact.
+    @Test func restoresDirectoryFromBackup() throws {
+        let db = try newDB()
+        try db.save(UserEntry(record: theodore, nickname: "Ted", persistentNotes: "NTS liaison"))
+        let backupURL = tempDir().appendingPathComponent("users-backup.sqlite")
+        try db.backup(to: backupURL)
+
+        try db.eraseAll()
+        #expect(db.isEmpty)
+
+        try db.restore(from: backupURL)
+        let found = try #require(db.find(callSign: "W1AW"))
+        #expect(found.nickname == "Ted")
+        #expect(found.persistentNotes == "NTS liaison")
+        #expect(found.lastName == "Marks")
     }
 
     @Test func deleteRemovesEntry() throws {
