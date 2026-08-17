@@ -61,6 +61,10 @@ public class SQLiteStore {
         }
         db = handle
         try exec("PRAGMA foreign_keys=ON;")
+        // SQLite's documented mitigation against hostile schema in a file we
+        // didn't write: stops schema objects from invoking functions that would
+        // otherwise be usable from a crafted database.
+        try? exec("PRAGMA trusted_schema=OFF;")
     }
 
     deinit {
@@ -99,39 +103,111 @@ public class SQLiteStore {
     /// reverse of `backup(to:)`, done in place through SQLite's backup API so
     /// the open connection stays valid.
     ///
-    /// `requiringTable` is checked on the *source* first, so pointing at a
-    /// random file (or at the other database's backup) fails cleanly instead of
-    /// destroying the data already here.
-    public func restore(from source: URL, requiringTable table: String) throws {
+    /// The source is fully vetted *before* a page is copied — size, integrity,
+    /// absence of triggers/views, and the expected table and columns — so
+    /// pointing at a random file, the other database's backup, or a crafted one
+    /// fails cleanly instead of replacing the data already here.
+    public func restore(from source: URL, requiringTable table: String, columns: [String]) throws {
+        if let size = (try? FileManager.default
+            .attributesOfItem(atPath: source.path)[.size]) as? Int,
+           size > Self.maxBackupBytes {
+            throw DatabaseError.sql("That file is far larger than a Net Report backup "
+                                    + "should be, so it has not been opened.")
+        }
+
         var src: OpaquePointer?
         guard sqlite3_open_v2(source.path, &src, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
-              src != nil else {
+              let src else {
             let message = src.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
             sqlite3_close(src)
             throw DatabaseError.open(message)
         }
         defer { sqlite3_close(src) }
 
-        // Validate before overwriting anything.
-        var check: OpaquePointer?
-        guard sqlite3_prepare_v2(
-            src, "SELECT name FROM sqlite_master WHERE type='table' AND name = ?;",
-            -1, &check, nil) == SQLITE_OK else {
-            throw DatabaseError.sql("That file is not a readable SQLite database.")
-        }
-        sqlite3_bind_text(check, 1, table, -1, SQLITE_TRANSIENT)
-        let matches = sqlite3_step(check) == SQLITE_ROW
-        sqlite3_finalize(check)
-        guard matches else {
-            throw DatabaseError.sql("That database has no “\(table)” table, so it isn't a "
-                                    + "Net Report backup of this kind.")
-        }
+        // Everything below runs against the *source* and must pass before a
+        // single page is copied, because a restore replaces this database
+        // wholesale — schema included.
+        try Self.requireIntact(src)
+        try Self.requireNoExecutableSchema(src)
+        try Self.requireTable(table, columns: columns, in: src)
 
         guard let restore = sqlite3_backup_init(db, "main", src, "main") else {
             throw lastError()
         }
         sqlite3_backup_step(restore, -1)
-        guard sqlite3_backup_finish(restore) == SQLITE_OK else { throw lastError() }
+        let result = sqlite3_backup_finish(restore)
+        // Report the source's failure, not the destination's stale message.
+        guard result == SQLITE_OK else {
+            throw DatabaseError.sql("Could not copy that backup (SQLite error \(result)).")
+        }
+    }
+
+    /// Largest backup file we will even open. Far beyond any real net log, and
+    /// it stops a huge crafted file from stalling the app mid-copy.
+    static let maxBackupBytes = 256 * 1024 * 1024
+
+    /// Refuse a structurally damaged file rather than copying it in.
+    private static func requireIntact(_ src: OpaquePointer) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(src, "PRAGMA quick_check;", -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.sql("That file is not a readable SQLite database.")
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW,
+              let text = sqlite3_column_text(stmt, 0),
+              String(cString: text) == "ok" else {
+            throw DatabaseError.sql("That database failed SQLite's integrity check, "
+                                    + "so it has not been imported.")
+        }
+    }
+
+    /// A restore copies the schema too, so a crafted file could otherwise
+    /// install triggers or views that then fire on this app's own writes.
+    /// Net Report's databases are plain tables and indexes; anything else means
+    /// the file wasn't produced by Back Up…
+    private static func requireNoExecutableSchema(_ src: OpaquePointer) throws {
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            src, "SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view');",
+            -1, &stmt, nil) == SQLITE_OK else {
+            throw DatabaseError.sql("That file is not a readable SQLite database.")
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_int64(stmt, 0) == 0 else {
+            throw DatabaseError.sql("That database defines triggers or views, which a "
+                                    + "Net Report backup never does. It has not been imported.")
+        }
+    }
+
+    /// Check the table exists *and* carries the columns this app reads. A table
+    /// of the right name but the wrong shape would restore "successfully" and
+    /// then fail every query afterwards.
+    private static func requireTable(_ table: String,
+                                     columns: [String],
+                                     in src: OpaquePointer) throws {
+        // `table` is a compile-time constant from this module, never user input,
+        // so interpolating it into the PRAGMA is safe (PRAGMA takes no binds).
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(src, "PRAGMA table_info(\(table));", -1, &stmt, nil) == SQLITE_OK
+        else {
+            throw DatabaseError.sql("That file is not a readable SQLite database.")
+        }
+        defer { sqlite3_finalize(stmt) }
+
+        var found: Set<String> = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let name = sqlite3_column_text(stmt, 1) { found.insert(String(cString: name)) }
+        }
+        guard !found.isEmpty else {
+            throw DatabaseError.sql("That database has no “\(table)” table, so it isn't a "
+                                    + "Net Report backup of this kind.")
+        }
+        let missing = columns.filter { !found.contains($0) }
+        guard missing.isEmpty else {
+            throw DatabaseError.sql("That database's “\(table)” table is missing "
+                                    + "\(missing.joined(separator: ", ")), so it isn't a "
+                                    + "Net Report backup.")
+        }
     }
 
     // MARK: - Low-level helpers

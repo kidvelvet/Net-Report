@@ -202,6 +202,92 @@ struct DatabaseTests {
         #expect(db.reportCount() == 1)
     }
 
+    /// Restoring a backup copies rows in wholesale, bypassing the range checks
+    /// that `importCSV` applies — so a hostile or hand-edited `.sqlite` must not
+    /// be able to launder an out-of-range message number onto a real radiogram.
+    @Test func hostileBackupCannotLaunderOutOfRangeNumbers() throws {
+        let dir = tempDir()
+        let hostilePath = dir.appendingPathComponent("hostile.sqlite").path
+
+        // Build a structurally valid Net Report database with extreme values.
+        let hostile = try NetDatabase(path: hostilePath)
+        try hostile.appendReport(messageNumber: Int.max, userCallSign: "W7SKW",
+                                 receivingStation: "W1AW", checkins: 1,
+                                 trafficMessages: 0, pdfPath: "/Applications/Calculator.app")
+        try hostile.setStartingNumberBypassingClamp(Int.max)
+
+        let live = try newDB()
+        try live.restore(from: URL(fileURLWithPath: hostilePath))
+
+        // Clamped whether the number comes from a row or from the meta table.
+        #expect(live.nextMessageNumber() == NetDatabase.maxAllowedMessageNumber)
+        #expect(live.startingNumber() == NetDatabase.maxAllowedMessageNumber)
+
+        try live.exec("DELETE FROM net_reports;")
+        #expect(live.nextMessageNumber() == NetDatabase.maxAllowedMessageNumber)
+    }
+
+    /// A restore copies the source's schema too, so a crafted backup could
+    /// otherwise install a trigger that then fires on this app's own writes.
+    @Test func restoreRejectsDatabasesCarryingTriggersOrViews() throws {
+        let dir = tempDir()
+        let hostilePath = dir.appendingPathComponent("trigger.sqlite").path
+        let hostile = try NetDatabase(path: hostilePath)
+        try hostile.exec("""
+            CREATE TRIGGER poison AFTER INSERT ON net_reports BEGIN
+              UPDATE net_reports SET user_call_sign = 'PWNED';
+            END;
+            """)
+
+        let live = try newDB()
+        try live.appendReport(messageNumber: 1, userCallSign: "W7SKW", receivingStation: "W1AW",
+                              checkins: 1, trafficMessages: 0, pdfPath: "keepme")
+
+        #expect(throws: DatabaseError.self) {
+            try live.restore(from: URL(fileURLWithPath: hostilePath))
+        }
+        #expect(live.reportCount() == 1)                       // untouched
+        #expect(try live.allReports().first?.userCallSign == "W7SKW")
+    }
+
+    /// A table of the right name but the wrong shape would restore "successfully"
+    /// and then break every query, with Erase All as the only way out.
+    @Test func restoreRejectsWrongColumns() throws {
+        let dir = tempDir()
+        let oddPath = dir.appendingPathComponent("odd.sqlite").path
+        let odd = try SQLiteStore(path: oddPath)
+        try odd.exec("CREATE TABLE net_reports (id INTEGER PRIMARY KEY, something_else TEXT);")
+
+        let live = try newDB()
+        try live.appendReport(messageNumber: 5, userCallSign: "W7SKW", receivingStation: "W1AW",
+                              checkins: 2, trafficMessages: 0, pdfPath: "keepme")
+
+        #expect(throws: DatabaseError.self) {
+            try live.restore(from: URL(fileURLWithPath: oddPath))
+        }
+        #expect(live.reportCount() == 1)
+    }
+
+    /// Restoring a report backup that predates the `meta` table must leave a
+    /// working database, not one missing tables the app needs.
+    @Test func restoreRepairsMissingSchema() throws {
+        let dir = tempDir()
+        let partialPath = dir.appendingPathComponent("partial.sqlite").path
+        let partial = try NetDatabase(path: partialPath)
+        try partial.appendReport(messageNumber: 3, userCallSign: "W7SKW", receivingStation: "W1AW",
+                                 checkins: 4, trafficMessages: 0, pdfPath: "none")
+        try partial.exec("DROP TABLE meta;")
+
+        let live = try newDB()
+        try live.restore(from: URL(fileURLWithPath: partialPath))
+
+        #expect(live.reportCount() == 1)
+        // `meta` was recreated by the post-restore migration, so this works
+        // rather than silently failing.
+        try live.setStartingNumber(20)
+        #expect(live.isSetupDone())
+    }
+
     @Test func parsesQuotedCSVFields() {
         let fields = NetDatabase.parseCSVLine("1,\"Doe, John\",\"say \"\"hi\"\"\",x")
         #expect(fields == ["1", "Doe, John", "say \"hi\"", "x"])

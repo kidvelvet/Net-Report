@@ -147,9 +147,19 @@ public struct CheckIn: Sendable, Equatable, Identifiable {
             .joined(separator: "; ")
     }
 
+    /// Longest text placed in a report cell. A value from a restored database or
+    /// a hostile QRZ response is otherwise unbounded, and `wrap` accepts any
+    /// single word regardless of width — a multi-megabyte "name" would become
+    /// one enormous line and a garbage PDF.
+    static let maxCellLength = 2_000
+
+    private static func capped(_ text: String) -> String {
+        text.count <= maxCellLength ? text : String(text.prefix(maxCellLength)) + "…"
+    }
+
     /// The row as ordered cells: Call Sign, Name, Nickname, City, County, Notes.
     public var tableRow: [String] {
-        [callSign, name, nickname, city, county, combinedNotes]
+        [callSign, name, nickname, city, county, combinedNotes].map(Self.capped)
     }
 
     /// Multi-line summary for the activity log, which net control reads from

@@ -237,9 +237,14 @@ After that:
   compromised endpoint can't use an XXE payload to read local files. The
   credentialed login POST also refuses HTTP redirects, so it can't be bounced
   to another host with the password still attached.
-- **Imported CSVs are treated as untrusted**: message numbers are range-checked,
-  and the stored PDF path is only ever *revealed in Finder*, never opened or
-  executed.
+- **Imported files are treated as untrusted.** CSV message numbers are
+  range-checked, and the stored PDF path is only ever *revealed in Finder*,
+  never opened or executed. An imported **backup database** is vetted before a
+  single page is copied — size, SQLite's own integrity check, absence of
+  triggers or views (a restore would otherwise adopt the source's schema), and
+  the expected table and columns — so a crafted or mismatched file is rejected
+  with your existing data intact. Values that arrive this way are re-clamped on
+  read rather than trusted.
 - **Your data never enters this repository.** `.gitignore` excludes the
   databases, PDFs, and any `*.csv` — those hold real names, addresses, and call
   signs of net participants. Example data in the source and tests uses the

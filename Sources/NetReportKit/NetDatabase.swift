@@ -101,8 +101,14 @@ public final class NetDatabase: SQLiteStore {
 
     // MARK: - Meta (starting number + first-run setup flag)
 
+    /// Clamped on the way *out* as well as on the way in. `setStartingNumber`
+    /// bounds what this app writes, but the value can also arrive from a
+    /// restored backup — an arbitrary `.sqlite` the user was handed — which
+    /// never passes through that setter. Without this, a poisoned `meta` row
+    /// would put a nonsense message number on a real radiogram.
     public func startingNumber() -> Int? {
-        metaValue("starting_number").flatMap(Int.init)
+        guard let stored = metaValue("starting_number").flatMap(Int.init) else { return nil }
+        return max(0, min(stored, Self.maxAllowedMessageNumber))
     }
 
     public func setStartingNumber(_ value: Int) throws {
@@ -110,6 +116,12 @@ public final class NetDatabase: SQLiteStore {
         let safe = max(0, min(value, Self.maxAllowedMessageNumber))
         try setMeta("starting_number", String(safe))
         try markSetupDone()
+    }
+
+    /// Writes `starting_number` without the clamp, so tests can reproduce a
+    /// foreign database whose meta row was never vetted by `setStartingNumber`.
+    func setStartingNumberBypassingClamp(_ value: Int) throws {
+        try setMeta("starting_number", String(value))
     }
 
     /// Whether the user has completed (or dismissed) first-run setup.
@@ -257,7 +269,12 @@ public final class NetDatabase: SQLiteStore {
 
     /// Replace the report log with a backup file's contents.
     public func restore(from source: URL) throws {
-        try restore(from: source, requiringTable: "net_reports")
+        try restore(from: source, requiringTable: "net_reports",
+                    columns: ["message_number", "timestamp", "user_call_sign",
+                              "receiving_station", "checkins", "traffic_messages", "pdf_file"])
+        // The copy brought the source's schema with it, so re-run migration to
+        // recreate anything it lacked (notably `meta`).
+        try migrate()
     }
 
     // MARK: - Erase

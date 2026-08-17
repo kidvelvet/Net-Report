@@ -163,7 +163,7 @@ public actor QRZClient {
             // host of its choosing.
             (data, response) = try await session.data(for: req, delegate: Self.redirectBlocker)
         } catch {
-            throw QRZError.network(error.localizedDescription)
+            throw QRZError.network(Self.sanitized(error.localizedDescription))
         }
 
         // Don't feed an error page to the XML parser and report it as a missing

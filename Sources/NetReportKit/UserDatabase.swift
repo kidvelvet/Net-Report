@@ -379,7 +379,10 @@ public final class UserDatabase: SQLiteStore {
 
     /// Replace the operator directory with a backup file's contents.
     public func restore(from source: URL) throws {
-        try restore(from: source, requiringTable: "users")
+        try restore(from: source, requiringTable: "users",
+                    columns: ["call_sign", "name", "first_name", "last_name", "nickname",
+                              "street", "city", "county", "state", "notes", "updated_at"])
+        try migrate()
     }
 
     public func eraseAll() throws {
