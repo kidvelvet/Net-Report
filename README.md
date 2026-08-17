@@ -143,6 +143,36 @@ Net Report/
 └─ scripts/build-app.sh     Bundle + ad-hoc sign NetReport.app
 ```
 
+## Install (no build required)
+
+Download the `.dmg` from the [latest release][releases], open it, and drag
+**NetReport.app** onto the **Applications** shortcut.
+
+[releases]: https://github.com/kidvelvet/Net-Report/releases
+
+### First launch: "the developer cannot be verified"
+
+The app is ad-hoc signed, not signed with a paid Apple Developer ID and not
+notarized, so macOS blocks it the first time. This is expected and is not a
+sign that anything is wrong with the download — it is what macOS does with any
+app that hasn't been through Apple's paid signing process.
+
+To open it:
+
+1. Open your **Applications** folder (double-clicking from the disk image won't
+   work — install it first).
+2. **Right-click** (or Control-click) **NetReport.app** and choose **Open**.
+3. Click **Open** in the dialog.
+
+Only needed once; afterwards it opens normally. If you prefer the command line,
+`xattr -d com.apple.quarantine /Applications/NetReport.app` does the same thing.
+
+Verify your download against the SHA-256 published in the release notes:
+
+```bash
+shasum -a 256 ~/Downloads/NetReport-1.0.0.dmg
+```
+
 ## Build & run
 
 Requires the Swift 6 toolchain (Xcode or Command Line Tools).
@@ -157,13 +187,22 @@ swift test
 # Build a self-contained, ad-hoc-signed app bundle and install it
 bash scripts/build-app.sh
 open ~/Applications/NetReport.app
+
+# Build a distributable disk image in dist/ (uses only built-in macOS tools)
+VERSION=1.0.0 bash scripts/build-dmg.sh
 ```
 
 The build script stages the bundle in `dist/` and then installs (replacing) it
 into **`~/Applications`** on every run. `~/Applications` is used because this
 account can't write to the system `/Applications` without an admin password; to
 target the system folder instead, run with `INSTALL_DIR=/Applications` (needs
-write access there).
+write access there), or `SKIP_INSTALL=1` to build without installing.
+
+`build-dmg.sh` produces `dist/NetReport-<version>.dmg` containing the app and an
+Applications shortcut, and prints the image's SHA-256 for the release notes. It
+is ad-hoc signed for the reason above; the script's header documents the
+`codesign` / `notarytool` commands to sign and notarize properly if you have a
+Developer ID.
 
 > **Note:** `swift test` uses the Xcode toolchain. If a freshly installed Xcode
 > blocks the toolchain with a license prompt, run `sudo xcodebuild -license accept`

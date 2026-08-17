@@ -34,7 +34,7 @@ PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ"
 APP="$PROJ/dist/NetReport.app"
 ID="${BUNDLE_ID:-com.w7skw.netreport}"
-VER="0.1.0"
+VER="${VERSION:-1.0.0}"
 
 echo "== 1/4 release build =="
 swift build -c release --product NetReport
@@ -68,12 +68,18 @@ codesign --force --sign - "$APP"
 # ~/Applications is used instead of /Applications because it needs no admin
 # password; override with INSTALL_DIR=/Applications (requires write access there).
 INSTALL_DIR="${INSTALL_DIR:-$HOME/Applications}"
+if [ -n "${SKIP_INSTALL:-}" ]; then
+  echo "== 4/4 install skipped (SKIP_INSTALL set) =="
+else
 echo "== 4/4 install to $INSTALL_DIR =="
 mkdir -p "$INSTALL_DIR"
 rm -rf "$INSTALL_DIR/NetReport.app"
 ditto "$APP" "$INSTALL_DIR/NetReport.app"
+fi
 
 echo ""
 echo "Built:     $APP"
-echo "Installed: $INSTALL_DIR/NetReport.app"
-echo "Run:       open \"$INSTALL_DIR/NetReport.app\""
+if [ -z "${SKIP_INSTALL:-}" ]; then
+  echo "Installed: $INSTALL_DIR/NetReport.app"
+  echo "Run:       open \"$INSTALL_DIR/NetReport.app\""
+fi
