@@ -88,7 +88,4 @@ enum KeychainStore {
         ]
         SecItemDelete(query as CFDictionary)
     }
-
-    /// Whether a credential is currently stored.
-    static var hasSavedCredentials: Bool { load() != nil }
 }

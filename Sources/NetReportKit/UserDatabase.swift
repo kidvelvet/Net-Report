@@ -209,6 +209,12 @@ public final class UserDatabase: SQLiteStore {
     /// Bind one entry into an already-prepared upsert statement and run it, so a
     /// bulk import can compile the SQL once instead of once per row.
     private func bindAndStep(_ stmt: OpaquePointer, _ entry: UserEntry, at date: Date) throws {
+        try bindAndStep(stmt, entry, stamp: SQLiteStore.timestampString(date))
+    }
+
+    /// Same, with the timestamp already formatted — a bulk import uses one
+    /// `Date` for every row, so re-formatting it per row is wasted work.
+    private func bindAndStep(_ stmt: OpaquePointer, _ entry: UserEntry, stamp: String) throws {
         sqlite3_reset(stmt)
         bindText(stmt, 1, Self.normalize(entry.callSign))
         bindText(stmt, 2, entry.name)
@@ -220,7 +226,7 @@ public final class UserDatabase: SQLiteStore {
         bindText(stmt, 8, entry.county)
         bindText(stmt, 9, entry.state)
         bindText(stmt, 10, entry.persistentNotes)
-        bindText(stmt, 11, SQLiteStore.timestampString(date))
+        bindText(stmt, 11, stamp)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw lastError() }
     }
 
@@ -300,6 +306,7 @@ public final class UserDatabase: SQLiteStore {
 
         let stmt = try prepare(Self.upsertSQL)
         defer { sqlite3_finalize(stmt) }
+        let stamp = SQLiteStore.timestampString(date)   // identical for every row
 
         try exec("BEGIN TRANSACTION;")
         var imported = 0
@@ -332,7 +339,7 @@ public final class UserDatabase: SQLiteStore {
                     county: value(countyIdx, fields),
                     state: value(stateIdx, fields),
                     persistentNotes: value(notesIdx, fields)
-                ), at: date)
+                ), stamp: stamp)
                 imported += 1
             }
             try exec("COMMIT;")

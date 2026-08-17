@@ -18,6 +18,7 @@
 
 import Testing
 import Foundation
+import CoreText
 @testable import NetReportKit
 
 private func tempDir() -> URL {
@@ -725,6 +726,67 @@ struct ReportGenerationTests {
         try db.setStartingNumber(100)
         let result = try generate(in: out, db: db, at: 27)
         #expect(result.messageNumber == 100)
+    }
+}
+
+@Suite("PDF text wrapping")
+struct WrapTests {
+    /// The wrapping algorithm exactly as it was before the single-measurement
+    /// fast path was added. The optimisation is only worth having if it is a
+    /// true equivalence, so it is checked against this reference.
+    private func referenceWrap(_ text: String, font: CTFont, maxWidth: CGFloat) -> [String] {
+        let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard !words.isEmpty else { return [""] }
+
+        var lines: [String] = []
+        var current = ""
+        for word in words {
+            let candidate = current.isEmpty ? word : current + " " + word
+            if RadiogramPDF.textWidth(candidate, font: font) <= maxWidth || current.isEmpty {
+                current = candidate
+            } else {
+                lines.append(current)
+                current = word
+            }
+        }
+        if !current.isEmpty { lines.append(current) }
+        return lines.isEmpty ? [""] : lines
+    }
+
+    @Test func fastPathMatchesOriginalAlgorithm() {
+        let font = RadiogramPDF.regular(9)
+        let corpus = [
+            "", " ", "   ",
+            "W7SKW", "Multnomah", "Hood River",
+            "Theodore Marks", "Ann Baker",
+            "Net control",
+            "NTS liaison; took 1 message tonight and will relay",
+            "Mobile tonight, weak signal here on the north side of the valley",
+            "Robert Verylongsurnamehere",
+            "Supercalifragilisticexpialidociousandthensome",
+            "A B C D E F G H I J K L M N O P Q R S T U V W X Y Z",
+            "one  two   three",     // repeated separators
+            "trailing space ",
+        ]
+        // Includes the real column widths (minus padding) plus tighter ones.
+        let widths: [CGFloat] = [8, 20, 62, 72, 102, 122, 300]
+
+        for text in corpus {
+            for maxWidth in widths {
+                let optimised = RadiogramPDF.wrap(text, font: font, maxWidth: maxWidth)
+                let reference = referenceWrap(text, font: font, maxWidth: maxWidth)
+                #expect(optimised == reference,
+                        "wrap mismatch for \"\(text)\" at width \(maxWidth): \(optimised) vs \(reference)")
+            }
+        }
+    }
+
+    /// The point of the fast path: text that fits is not measured word by word.
+    @Test func singleLineTextIsReturnedWhole() {
+        let font = RadiogramPDF.regular(9)
+        #expect(RadiogramPDF.wrap("Net control", font: font, maxWidth: 300) == ["Net control"])
+        #expect(RadiogramPDF.wrap("", font: font, maxWidth: 300) == [""])
+        #expect(RadiogramPDF.wrap("   ", font: font, maxWidth: 300) == [""])
     }
 }
 

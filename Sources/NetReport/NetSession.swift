@@ -152,9 +152,12 @@ final class NetSession {
         refreshOperatorCount()
     }
 
-    private func storeOperator(_ entry: UserEntry) throws {
+    /// `isNew: false` skips the recount: `save` upserts on the call sign, so if
+    /// the caller already established the row exists, the write is an UPDATE and
+    /// the count cannot have changed. That spares a COUNT(*) per check-in.
+    private func storeOperator(_ entry: UserEntry, isNew: Bool = true) throws {
         try userDatabase.save(entry)
-        refreshOperatorCount()
+        if isNew { refreshOperatorCount() }
     }
 
     /// Re-read the cached report figures after report-log changes.
@@ -361,11 +364,6 @@ final class NetSession {
         credentialsAreSaved = false
         needsCredentials = true
         append(log: "Signed out of QRZ; saved credentials removed from the Keychain.")
-    }
-
-    /// The database file's location, for display.
-    var databasePath: String {
-        outputDirectory.appendingPathComponent("netreport.sqlite").path
     }
 
     // MARK: - Database lifecycle
@@ -612,7 +610,7 @@ final class NetSession {
         )
         // Only persistent notes are stored; temporary notes stay in this net.
         do {
-            try storeOperator(entry)
+            try storeOperator(entry, isNew: known == nil)
         } catch {
             errorMessage = "Could not save to the operator directory: \(error.localizedDescription)"
         }

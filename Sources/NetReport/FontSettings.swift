@@ -89,12 +89,6 @@ final class FontSettings {
         persist()
     }
 
-    /// Restore one box to its default.
-    func reset(_ box: Box) {
-        sizes[box.rawValue] = nil
-        persist()
-    }
-
     /// Restore every box to its default.
     func resetAll() {
         sizes = [:]

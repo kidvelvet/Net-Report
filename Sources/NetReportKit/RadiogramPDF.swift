@@ -280,7 +280,7 @@ public enum RadiogramPDF {
     // Deliberately not memoised in a static dictionary: these are callable from
     // any thread, and Core Text already caches font instances internally, so a
     // hand-rolled cache would add a data race for no real gain.
-    private static func regular(_ size: CGFloat) -> CTFont {
+    static func regular(_ size: CGFloat) -> CTFont {
         CTFontCreateWithName("Helvetica" as CFString, size, nil)
     }
     private static func bold(_ size: CGFloat) -> CTFont {
@@ -293,6 +293,12 @@ public enum RadiogramPDF {
     private static let fontKey = NSAttributedString.Key(kCTFontAttributeName as String)
     private static let useContextColorKey =
         NSAttributedString.Key(kCTForegroundColorFromContextAttributeName as String)
+
+    /// Width of `text` in `font`. Internal so the wrapping equivalence test can
+    /// measure exactly the way the renderer does.
+    static func textWidth(_ text: String, font: CTFont) -> CGFloat {
+        CGFloat(CTLineGetTypographicBounds(makeLine(text, font: font), nil, nil, nil))
+    }
 
     private static func makeLine(_ text: String, font: CTFont) -> CTLine {
         let attrs: [NSAttributedString.Key: Any] = [
@@ -328,13 +334,32 @@ public enum RadiogramPDF {
     }
 
     /// Greedy word-wrap to `maxWidth`, measuring with Core Text.
-    private static func wrap(_ text: String, font: CTFont, maxWidth: CGFloat) -> [String] {
-        let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        guard !words.isEmpty else { return [""] }
+    static func wrap(_ text: String, font: CTFont, maxWidth: CGFloat) -> [String] {
+        guard !text.isEmpty else { return [""] }
+        // The word-split below discards whitespace, so an all-blank cell has
+        // always produced a single empty line. Preserve that exactly.
+        if text.allSatisfy(\.isWhitespace) { return [""] }
 
         func width(_ s: String) -> CGFloat {
             CGFloat(CTLineGetTypographicBounds(makeLine(s, font: font), nil, nil, nil))
         }
+
+        // Fast path: most cells — call sign, city, county, state, short notes —
+        // fit on one line, and if the whole string fits then the greedy loop
+        // below would put it all on one line anyway. That replaces one
+        // measurement per word (plus the word-splitting allocations) with a
+        // single measurement.
+        //
+        // It only holds when rejoining the words would reproduce the string
+        // exactly. Splitting on spaces and rejoining also collapses runs of
+        // spaces and trims the edges, so text with irregular spacing has to go
+        // the long way round or the cell would render differently.
+        let spacingIsRegular = !text.hasPrefix(" ") && !text.hasSuffix(" ")
+            && !text.contains("  ")
+        if spacingIsRegular, width(text) <= maxWidth { return [text] }
+
+        let words = text.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        guard !words.isEmpty else { return [""] }
 
         var lines: [String] = []
         var current = ""

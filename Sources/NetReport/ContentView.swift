@@ -158,7 +158,6 @@ private struct CheckInEditorView: View {
     @State private var persistentNotes = ""
     @State private var temporaryNotes = ""
     @State private var status: NetSession.LookupSource?
-    @State private var lastLookedUp = ""
     @State private var isReceivingStation = false
     @State private var hasAnnouncement = false
     @FocusState private var callSignFocused: Bool
@@ -300,7 +299,6 @@ private struct CheckInEditorView: View {
         persistentNotes = existing.persistentNotes
         temporaryNotes = existing.temporaryNotes
         hasAnnouncement = existing.hasAnnouncement
-        lastLookedUp = existing.callSign
         // Reflect whether this operator is already the NTS receiving station.
         isReceivingStation = !existing.callSign.isEmpty
             && existing.callSign.caseInsensitiveCompare(session.receivingStation) == .orderedSame
@@ -317,7 +315,6 @@ private struct CheckInEditorView: View {
         persistentNotes = ""
         temporaryNotes = ""
         status = nil
-        lastLookedUp = ""
         isReceivingStation = false
         hasAnnouncement = false
         callSignFocused = true
@@ -332,7 +329,6 @@ private struct CheckInEditorView: View {
         Task {
             let resolved = await session.refreshFromQRZ(callSign: call)
             status = resolved.source
-            lastLookedUp = call
             if case .notFound = resolved.source { return }
 
             let entry = resolved.entry
@@ -354,7 +350,6 @@ private struct CheckInEditorView: View {
         Task {
             let resolved = await session.resolveStation(callSign: call)
             status = resolved.source
-            lastLookedUp = call
             if case .notFound = resolved.source { return }
 
             let entry = resolved.entry
@@ -914,9 +909,12 @@ private struct ActivityLog: View {
         GroupBox {
             ScrollViewReader { proxy in
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        // Indices rather than Array(enumerated()): the log grows
-                        // all night and that rebuilt a paired array every redraw.
+                    // Lazy, because the log is the one thing that grows all
+                    // night: an eager VStack lays out every past entry again on
+                    // each append, so the cost over a whole net is quadratic.
+                    // Indices rather than Array(enumerated()) for the same
+                    // reason — that rebuilt a paired array every redraw.
+                    LazyVStack(alignment: .leading, spacing: 2) {
                         ForEach(session.log.indices, id: \.self) { index in
                             // Entries can span lines (a check-in carries its
                             // notes underneath), so let them wrap fully — this
