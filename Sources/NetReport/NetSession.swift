@@ -657,10 +657,38 @@ final class NetSession {
         let id = UUID()
         var callSign: String = ""
         var nickname: String = ""
+        /// The last lookup done for this line. Only trusted while it still
+        /// matches the call sign in the field — retyping invalidates it.
+        var lookup: Lookup?
 
-        var isBlank: Bool {
-            callSign.trimmingCharacters(in: .whitespaces).isEmpty
+        struct Lookup: Equatable {
+            var callSign: String
+            /// Nil when nothing was found (or the lookup could not run).
+            var entry: UserEntry?
+            var source: LookupSource
         }
+
+        var normalizedCall: String {
+            callSign.trimmingCharacters(in: .whitespaces).uppercased()
+        }
+
+        var isBlank: Bool { normalizedCall.isEmpty }
+
+        /// The lookup result, if it is for the call sign currently typed.
+        var currentLookup: Lookup? {
+            lookup?.callSign == normalizedCall ? lookup : nil
+        }
+    }
+
+    /// Look up one extra line the same way the main call sign is looked up.
+    func lookUp(_ station: AdditionalStation) async -> AdditionalStation.Lookup? {
+        let call = station.normalizedCall
+        guard !call.isEmpty else { return nil }
+        let resolved = await resolveStation(callSign: call)
+        if case .notFound = resolved.source {
+            return .init(callSign: call, entry: nil, source: resolved.source)
+        }
+        return .init(callSign: call, entry: resolved.entry, source: resolved.source)
     }
 
     /// Save the primary entry and any additional stations checking in with it.
@@ -701,13 +729,14 @@ final class NetSession {
         var seen: Set<String> = [callSign.trimmingCharacters(in: .whitespaces).uppercased()]
 
         for station in additional where !station.isBlank {
-            let call = station.callSign.trimmingCharacters(in: .whitespaces).uppercased()
+            let call = station.normalizedCall
             guard seen.insert(call).inserted else {
                 append(log: "Skipped duplicate \(call) in this entry.")
                 continue
             }
             await addAdditionalStation(call,
                                        nickname: station.nickname.trimmingCharacters(in: .whitespaces),
+                                       lookup: station.currentLookup,
                                        sharingLocation: fallback)
         }
 
@@ -720,12 +749,16 @@ final class NetSession {
     private func addAdditionalStation(
         _ call: String,
         nickname: String,
+        lookup: AdditionalStation.Lookup?,
         sharingLocation fallback: (city: String, county: String, state: String)
     ) async {
         let known = userDatabase.find(callSign: call)
-        var record = known?.record
+        var record = lookup?.entry?.record ?? known?.record
 
-        if record == nil, let client {
+        // A line already looked up in the editor is trusted as-is — the
+        // operator has seen the result — so one call sign costs one lookup,
+        // not one in the editor and another on save.
+        if lookup == nil, record == nil, let client {
             isBusy = true
             record = (try? await client.lookup(callSign: call)) ?? nil
             isBusy = false

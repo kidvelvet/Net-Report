@@ -162,7 +162,13 @@ private struct CheckInEditorView: View {
     @State private var hasAnnouncement = false
     /// Extra operators checking in from this same station.
     @State private var additional: [NetSession.AdditionalStation] = []
-    @FocusState private var callSignFocused: Bool
+    @FocusState private var focus: Field?
+
+    /// Which text field has keyboard focus.
+    private enum Field: Hashable {
+        case primary
+        case line(UUID)
+    }
 
     private var isEditing: Bool { target.existing != nil }
     private var canSave: Bool { !callSign.trimmingCharacters(in: .whitespaces).isEmpty }
@@ -183,7 +189,7 @@ private struct CheckInEditorView: View {
                             .textFieldStyle(.roundedBorder)
                             .font(.body.monospaced())
                             .frame(width: 130)
-                            .focused($callSignFocused)
+                            .focused($focus, equals: .primary)
                             .onSubmit { lookUp() }
                         Button("Look Up") { lookUp() }
                             .disabled(session.isBusy || !canSave)
@@ -298,7 +304,7 @@ private struct CheckInEditorView: View {
         .frame(width: 480)
         .onAppear {
             loadExisting()
-            callSignFocused = true
+            focus = .primary
         }
     }
 
@@ -310,28 +316,36 @@ private struct CheckInEditorView: View {
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 Button {
-                    additional.append(NetSession.AdditionalStation())
+                    addLine()
                 } label: {
                     Label("Add Line", systemImage: "plus")
                 }
-                .help("Add another call sign checking in with this operator")
+                .keyboardShortcut("l", modifiers: .command)
+                .help("Add another call sign checking in with this operator (⌘L)")
             }
 
-            ForEach($additional) { $station in
-                HStack(spacing: 6) {
-                    TextField("CALL", text: $station.callSign)
-                        .textFieldStyle(.roundedBorder)
-                        .font(.body.monospaced())
-                        .frame(width: 130)
-                    TextField("nickname (optional)", text: $station.nickname)
-                        .textFieldStyle(.roundedBorder)
-                    Button(role: .destructive) {
-                        additional.removeAll { $0.id == station.id }
-                    } label: {
-                        Image(systemName: "minus.circle.fill")
+            // Iterate values, not `$additional`: see `lineBinding` for why the
+            // text fields must not hold positional bindings.
+            ForEach(additional) { station in
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        TextField("CALL", text: lineBinding(station.id, \.callSign))
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                            .frame(width: 130)
+                            .focused($focus, equals: .line(station.id))
+                            .onSubmit { Task { await lookUpLine(station.id) } }
+                        TextField("nickname (optional)", text: lineBinding(station.id, \.nickname))
+                            .textFieldStyle(.roundedBorder)
+                        Button(role: .destructive) {
+                            removeLine(station.id)
+                        } label: {
+                            Image(systemName: "minus.circle.fill")
+                        }
+                        .buttonStyle(.borderless)
+                        .help("Remove this line")
                     }
-                    .buttonStyle(.borderless)
-                    .help("Remove this line")
+                    lineStatus(station)
                 }
             }
 
@@ -375,8 +389,10 @@ private struct CheckInEditorView: View {
         status = nil
         isReceivingStation = false
         hasAnnouncement = false
+        // Focus first: a line's text field must not still be first responder
+        // when its row disappears, or ending that edit reads a removed row.
+        focus = .primary
         additional = []
-        callSignFocused = true
     }
 
     /// Force a QRZ lookup to fill in details missing from the local record.
@@ -402,25 +418,102 @@ private struct CheckInEditorView: View {
     }
 
     /// Resolve the call sign and fill in the details.
+    /// Look up the main call sign, then every extra line — two call signs,
+    /// two lookups.
     private func lookUp() {
+        Task {
+            await lookUpPrimary()
+            for line in additional { await lookUpLine(line.id) }
+        }
+    }
+
+    private func lookUpPrimary() async {
         let call = callSign.trimmingCharacters(in: .whitespaces).uppercased()
         guard !call.isEmpty else { return }
         callSign = call
-        Task {
-            let resolved = await session.resolveStation(callSign: call)
-            status = resolved.source
-            if case .notFound = resolved.source { return }
+        let resolved = await session.resolveStation(callSign: call)
+        status = resolved.source
+        if case .notFound = resolved.source { return }
 
-            let entry = resolved.entry
-            name = entry.name
-            city = entry.city
-            county = entry.county
-            state = entry.state
-            // Don't clobber a nickname/notes the user is already typing.
-            // Temporary notes are never pre-filled — they're per-net.
-            if nickname.isEmpty { nickname = entry.nickname }
-            if persistentNotes.isEmpty { persistentNotes = entry.persistentNotes }
+        let entry = resolved.entry
+        name = entry.name
+        city = entry.city
+        county = entry.county
+        state = entry.state
+        // Don't clobber a nickname/notes the user is already typing.
+        // Temporary notes are never pre-filled — they're per-net.
+        if nickname.isEmpty { nickname = entry.nickname }
+        if persistentNotes.isEmpty { persistentNotes = entry.persistentNotes }
+    }
+
+    /// Look up one extra line. Skips a line already looked up for the call sign
+    /// it holds, and tolerates the line being removed or retyped while the
+    /// lookup was in flight.
+    private func lookUpLine(_ id: UUID) async {
+        guard let line = additional.first(where: { $0.id == id }),
+              !line.isBlank, line.currentLookup == nil else { return }
+        guard let result = await session.lookUp(line) else { return }
+        guard let index = additional.firstIndex(where: { $0.id == id }),
+              additional[index].normalizedCall == result.callSign else { return }
+
+        additional[index].lookup = result
+        additional[index].callSign = result.callSign
+        if additional[index].nickname.isEmpty, let saved = result.entry?.nickname, !saved.isEmpty {
+            additional[index].nickname = saved
         }
+    }
+
+    /// What a lookup found for one extra line, shown beneath it.
+    @ViewBuilder
+    private func lineStatus(_ station: NetSession.AdditionalStation) -> some View {
+        if let lookup = station.currentLookup {
+            if let entry = lookup.entry {
+                let place = [entry.city, entry.state].filter { !$0.isEmpty }.joined(separator: ", ")
+                Label(place.isEmpty ? entry.name : "\(entry.name) · \(place)",
+                      systemImage: statusIcon(lookup.source))
+                    .font(.caption)
+                    .foregroundStyle(statusColor(lookup.source))
+            } else {
+                Label("Not found — will use this station's location",
+                      systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+        } else if !station.isBlank {
+            Text("Press Return or Look Up to check this call sign")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    // MARK: Extra lines
+
+    private func addLine() {
+        let line = NetSession.AdditionalStation()
+        additional.append(line)
+        focus = .line(line.id)
+    }
+
+    private func removeLine(_ id: UUID) {
+        // Release focus before the row goes, for the same reason as resetForm.
+        if focus == .line(id) { focus = .primary }
+        additional.removeAll { $0.id == id }
+    }
+
+    /// Bindings that find their line by id rather than by position. SwiftUI's
+    /// `ForEach($array)` hands each text field a binding to `array[index]`;
+    /// when a row is removed while its field still has focus, the field's
+    /// end-of-editing read hits that stale index and traps. Looking the line up
+    /// by id instead — and tolerating its absence — cannot go out of range.
+    private func lineBinding(_ id: UUID,
+                             _ field: WritableKeyPath<NetSession.AdditionalStation, String>)
+        -> Binding<String> {
+        Binding(
+            get: { additional.first(where: { $0.id == id })?[keyPath: field] ?? "" },
+            set: { newValue in
+                guard let index = additional.firstIndex(where: { $0.id == id }) else { return }
+                additional[index][keyPath: field] = newValue
+            })
     }
 
     /// Save the entry. With `keepOpen`, clear the form for the next call sign
