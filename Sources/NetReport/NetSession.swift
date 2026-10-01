@@ -566,6 +566,110 @@ final class NetSession {
 
     func dismissEditor() { editorTarget = nil }
 
+    /// One extra operator checking in from the same station as the primary
+    /// entry — a second person at one radio, which happens regularly on a net.
+    struct AdditionalStation: Identifiable, Equatable {
+        let id = UUID()
+        var callSign: String = ""
+        var nickname: String = ""
+
+        var isBlank: Bool {
+            callSign.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+    }
+
+    /// Save the primary entry and any additional stations checking in with it.
+    ///
+    /// The extras are resolved the same way the editor resolves a call sign —
+    /// local directory first, QRZ only on a miss — and anything still unknown
+    /// inherits the primary's location, since by definition they are at the
+    /// same radio. Returns true when the primary entry was accepted.
+    @discardableResult
+    func saveCheckIns(
+        id: UUID?,
+        callSign: String,
+        name: String,
+        nickname: String,
+        city: String,
+        county: String,
+        state: String,
+        persistentNotes: String,
+        temporaryNotes: String,
+        hasAnnouncement: Bool = false,
+        isReceivingStation: Bool = false,
+        additional: [AdditionalStation] = [],
+        keepEditorOpen: Bool = false
+    ) async -> Bool {
+        // Keep the editor open through the primary save so a rejection doesn't
+        // close the window and lose what was typed.
+        guard saveCheckIn(
+            id: id, callSign: callSign, name: name, nickname: nickname,
+            city: city, county: county, state: state,
+            persistentNotes: persistentNotes, temporaryNotes: temporaryNotes,
+            hasAnnouncement: hasAnnouncement, isReceivingStation: isReceivingStation,
+            keepEditorOpen: true
+        ) else { return false }
+
+        let fallback = (city: city.trimmingCharacters(in: .whitespaces),
+                        county: county.trimmingCharacters(in: .whitespaces),
+                        state: state.trimmingCharacters(in: .whitespaces))
+        var seen: Set<String> = [callSign.trimmingCharacters(in: .whitespaces).uppercased()]
+
+        for station in additional where !station.isBlank {
+            let call = station.callSign.trimmingCharacters(in: .whitespaces).uppercased()
+            guard seen.insert(call).inserted else {
+                append(log: "Skipped duplicate \(call) in this entry.")
+                continue
+            }
+            await addAdditionalStation(call,
+                                       nickname: station.nickname.trimmingCharacters(in: .whitespaces),
+                                       sharingLocation: fallback)
+        }
+
+        if !keepEditorOpen { editorTarget = nil }
+        return true
+    }
+
+    /// Resolve and append one extra station, reusing whatever the directory
+    /// already knows so a saved nickname or persistent notes are not lost.
+    private func addAdditionalStation(
+        _ call: String,
+        nickname: String,
+        sharingLocation fallback: (city: String, county: String, state: String)
+    ) async {
+        let known = userDatabase.find(callSign: call)
+        var record = known?.record
+
+        if record == nil, let client {
+            isBusy = true
+            record = (try? await client.lookup(callSign: call)) ?? nil
+            isBusy = false
+            if let record { storeDirectoryInfo(record) }
+        }
+
+        // Persist a nickname typed here without clobbering notes already stored.
+        let effectiveNickname = nickname.isEmpty ? (known?.nickname ?? "") : nickname
+        if !nickname.isEmpty {
+            var entry = userDatabase.find(callSign: call)
+                ?? UserEntry(record: record ?? HamRecord(callSign: call, name: "Unknown",
+                                                         street: "", city: "", county: "", state: ""))
+            entry.nickname = nickname
+            try? storeOperator(entry, isNew: known == nil)
+        }
+
+        let stored = userDatabase.find(callSign: call)
+        let checkIn = CheckIn.sharingStation(
+            callSign: call,
+            record: record ?? stored?.record,
+            nickname: effectiveNickname,
+            persistentNotes: stored?.persistentNotes ?? "",
+            fallbackCity: fallback.city,
+            fallbackCounty: fallback.county,
+            fallbackState: fallback.state)
+        checkIns.append(checkIn)
+        append(log: checkIn.logLine)
+    }
+
     /// Add a new check-in or update an existing one, and persist the operator's
     /// details (nickname + notes included) to the local directory.
     ///
@@ -912,3 +1016,4 @@ final class NetSession {
         log.append(line)
     }
 }
+

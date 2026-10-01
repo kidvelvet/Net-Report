@@ -140,6 +140,32 @@ public struct CheckIn: Sendable, Equatable, Identifiable {
         )
     }
 
+    /// Build a check-in for an operator sharing another station's radio — a
+    /// second person checking in with one operator.
+    ///
+    /// Whatever is known about them wins; anything unknown inherits the host
+    /// station's location, which is more accurate than leaving it blank or
+    /// printing "Unknown" on the report, because they are physically there.
+    public static func sharingStation(
+        callSign: String,
+        record: HamRecord?,
+        nickname: String = "",
+        persistentNotes: String = "",
+        fallbackCity: String,
+        fallbackCounty: String,
+        fallbackState: String
+    ) -> CheckIn {
+        CheckIn(
+            callSign: callSign.trimmingCharacters(in: .whitespaces).uppercased(),
+            name: record?.name.meaningful ?? "Unknown",
+            nickname: nickname.trimmingCharacters(in: .whitespaces),
+            city: record?.city.meaningful ?? fallbackCity,
+            county: record?.county.meaningful ?? fallbackCounty,
+            state: record?.state.meaningful ?? fallbackState,
+            persistentNotes: persistentNotes
+        )
+    }
+
     /// Both kinds of note as one string, for the report's single Notes column.
     public var combinedNotes: String {
         [persistentNotes, temporaryNotes]
@@ -175,5 +201,17 @@ public struct CheckIn: Sendable, Equatable, Identifiable {
         if !persistentNotes.isEmpty { line += "\n    Notes: \(persistentNotes)" }
         if !temporaryNotes.isEmpty { line += "\n    Tonight: \(temporaryNotes)" }
         return line
+    }
+}
+
+extension String {
+    /// Nil when this carries no real information. Both QRZ and this app fill
+    /// missing fields with the literal "Unknown", so that counts as absent —
+    /// otherwise "Unknown" would win over a value we actually have.
+    var meaningful: String? {
+        let trimmed = trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty,
+              trimmed.caseInsensitiveCompare("Unknown") != .orderedSame else { return nil }
+        return trimmed
     }
 }

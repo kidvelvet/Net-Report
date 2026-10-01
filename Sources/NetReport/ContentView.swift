@@ -160,10 +160,15 @@ private struct CheckInEditorView: View {
     @State private var status: NetSession.LookupSource?
     @State private var isReceivingStation = false
     @State private var hasAnnouncement = false
+    /// Extra operators checking in from this same station.
+    @State private var additional: [NetSession.AdditionalStation] = []
     @FocusState private var callSignFocused: Bool
 
     private var isEditing: Bool { target.existing != nil }
     private var canSave: Bool { !callSign.trimmingCharacters(in: .whitespaces).isEmpty }
+
+    /// How many check-ins this window will create, for the Save button's label.
+    private var pendingCount: Int { 1 + additional.filter { !$0.isBlank }.count }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -245,6 +250,13 @@ private struct CheckInEditorView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // Two operators at one radio is common; each line becomes its own
+            // check-in. Only offered when adding — an edit changes one row.
+            if !isEditing {
+                Divider()
+                additionalStations
+            }
+
             Toggle("Announcement", isOn: $hasAnnouncement)
                 .help("This station has an announcement or QST to read. "
                       + "Flagged stations are collected in the Announcements window.")
@@ -271,13 +283,15 @@ private struct CheckInEditorView: View {
                     .help("Save this entry (if any), log a net break, and close this window")
                 Spacer()
                 if !isEditing {
-                    Button("Save and Add New") { save(keepOpen: true) }
-                        .disabled(!canSave)
+                    Button("Save and Add New") { Task { await save(keepOpen: true) } }
+                        .disabled(!canSave || session.isBusy)
                 }
-                Button("Save") { save(keepOpen: false) }
-                    .buttonStyle(.borderedProminent)
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!canSave)
+                Button(pendingCount > 1 ? "Save \(pendingCount) Check-ins" : "Save") {
+                    Task { await save(keepOpen: false) }
+                }
+                .buttonStyle(.borderedProminent)
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canSave || session.isBusy)
             }
         }
         .padding(20)
@@ -285,6 +299,50 @@ private struct CheckInEditorView: View {
         .onAppear {
             loadExisting()
             callSignFocused = true
+        }
+    }
+
+    /// Extra call signs checking in from the same radio as the entry above.
+    private var additionalStations: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Also checking in from this station")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    additional.append(NetSession.AdditionalStation())
+                } label: {
+                    Label("Add Line", systemImage: "plus")
+                }
+                .help("Add another call sign checking in with this operator")
+            }
+
+            ForEach($additional) { $station in
+                HStack(spacing: 6) {
+                    TextField("CALL", text: $station.callSign)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.body.monospaced())
+                        .frame(width: 130)
+                    TextField("nickname (optional)", text: $station.nickname)
+                        .textFieldStyle(.roundedBorder)
+                    Button(role: .destructive) {
+                        additional.removeAll { $0.id == station.id }
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Remove this line")
+                }
+            }
+
+            if !additional.isEmpty {
+                Text("Each line is saved as its own check-in. Details come from your "
+                     + "directory or QRZ; anything still unknown uses the location above, "
+                     + "since they are at the same radio.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -317,6 +375,7 @@ private struct CheckInEditorView: View {
         status = nil
         isReceivingStation = false
         hasAnnouncement = false
+        additional = []
         callSignFocused = true
     }
 
@@ -365,16 +424,18 @@ private struct CheckInEditorView: View {
     }
 
     /// Save the entry. With `keepOpen`, clear the form for the next call sign
-    /// instead of closing the window.
+    /// instead of closing the window. Async because any additional call signs
+    /// may each need a lookup.
     @discardableResult
-    private func save(keepOpen: Bool) -> Bool {
-        let saved = session.saveCheckIn(
+    private func save(keepOpen: Bool) async -> Bool {
+        let saved = await session.saveCheckIns(
             id: target.existing?.id,
             callSign: callSign, name: name, nickname: nickname,
             city: city, county: county, state: state,
             persistentNotes: persistentNotes, temporaryNotes: temporaryNotes,
             hasAnnouncement: hasAnnouncement,
             isReceivingStation: isReceivingStation,
+            additional: additional,
             keepEditorOpen: keepOpen)
         if saved && keepOpen { resetForm() }
         return saved
@@ -383,12 +444,14 @@ private struct CheckInEditorView: View {
     /// Save whatever has been entered (so nothing is lost), then log the break
     /// and close the window.
     private func saveThenBreak() {
-        if canSave {
-            // Keep the window open through the save so a failure doesn't close
-            // it and discard the entry.
-            guard save(keepOpen: true) else { return }
+        Task {
+            if canSave {
+                // Keep the window open through the save so a failure doesn't
+                // close it and discard the entry.
+                guard await save(keepOpen: true) else { return }
+            }
+            session.logBreakFromEditor()
         }
-        session.logBreakFromEditor()
     }
 
     private func statusText(_ source: NetSession.LookupSource) -> String {

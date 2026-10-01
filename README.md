@@ -15,7 +15,9 @@ CLI, with the interactive prompt loop replaced by a real macOS interface.
   **"Ted Marks"** on the radiogram.
 - **Net check-in log** — the operator is seeded as the first check-in. **Add
   Check-in…** opens a dedicated window for the call sign, nickname, and notes,
-  auto-filling name, city, county, and state. It stays open across entries when
+  auto-filling name, city, county, and state. When two people check in from one
+  radio, extra call sign lines in that same window log each of them as its own
+  check-in. It stays open across entries when
   you use **Save and Add New**, so a whole net can be logged without returning to
   the main window. **Right-click any row** in the check-in list to **Edit** (fix a
   mistyped call sign) or **Delete** it; double-click also opens the editor.
@@ -250,10 +252,17 @@ After that:
    press Return (or click **Look Up**) — the local directory answers instantly,
    otherwise QRZ is queried once and the result is cached. Add a nickname,
    persistent notes (remembered) and temporary notes (tonight only), tick
-   **NTS Receiving Station** if this operator will receive the form, then:
+   **NTS Receiving Station** if this operator will receive the form.
+
+   If more than one person is checking in from that same radio, click
+   **Add Line** under *Also checking in from this station* and enter each extra
+   call sign (with an optional nickname). Each line becomes its own check-in,
+   looked up the same way; anything still unknown inherits the location above,
+   since they are at the same set. Then:
    - **Save and Add New** — records it and clears the form for the next station,
      keeping the window open (cursor returns to the call sign field).
-   - **Save** — records it and closes the window.
+   - **Save** — records it and closes the window. The button shows how many
+     check-ins it will create when extra lines are filled in.
    - **Break** — saves whatever is entered, logs a net break, and closes.
 
    Right-click a row in the check-in list to **Edit** or **Delete** it (deleting

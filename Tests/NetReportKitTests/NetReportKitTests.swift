@@ -815,6 +815,83 @@ struct ReportGenerationTests {
     }
 }
 
+@Suite("Stations sharing one radio")
+struct SharedStationTests {
+    private let host = (city: "Portland", county: "Multnomah", state: "OR")
+
+    private func sharing(_ call: String, record: HamRecord?,
+                         nickname: String = "", notes: String = "") -> CheckIn {
+        CheckIn.sharingStation(callSign: call, record: record, nickname: nickname,
+                               persistentNotes: notes,
+                               fallbackCity: host.city, fallbackCounty: host.county,
+                               fallbackState: host.state)
+    }
+
+    @Test func knownOperatorKeepsTheirOwnDetails() {
+        let record = HamRecord(callSign: "K7ABC", name: "Ann Baker",
+                               firstName: "Ann", lastName: "Baker", street: "2 Rd",
+                               city: "Bend", county: "Deschutes", state: "OR")
+        let checkIn = sharing("k7abc", record: record, nickname: "Annie", notes: "Prefers 2m")
+
+        #expect(checkIn.callSign == "K7ABC")        // normalised
+        #expect(checkIn.name == "Ann Baker")
+        #expect(checkIn.nickname == "Annie")
+        #expect(checkIn.city == "Bend")             // their own, not the host's
+        #expect(checkIn.county == "Deschutes")
+        #expect(checkIn.persistentNotes == "Prefers 2m")
+    }
+
+    /// The point of the feature: an unknown second operator is at the host's
+    /// radio, so the host's location is the right answer.
+    @Test func unknownOperatorInheritsTheHostLocation() {
+        let checkIn = sharing("N7XYZ", record: nil, nickname: "Bob")
+
+        #expect(checkIn.callSign == "N7XYZ")
+        #expect(checkIn.name == "Unknown")
+        #expect(checkIn.nickname == "Bob")
+        #expect(checkIn.city == "Portland")
+        #expect(checkIn.county == "Multnomah")
+        #expect(checkIn.state == "OR")
+    }
+
+    /// QRZ writes the literal "Unknown" into fields it has no value for. That
+    /// must not beat the host's real location.
+    @Test func placeholderFieldsDoNotBeatTheHostLocation() {
+        let sparse = HamRecord(callSign: "N7XYZ", name: "Unknown", street: "Unknown",
+                               city: "Unknown", county: "unknown", state: "  ")
+        let checkIn = sharing("N7XYZ", record: sparse)
+
+        #expect(checkIn.name == "Unknown")          // nothing better to show
+        #expect(checkIn.city == "Portland")         // not "Unknown"
+        #expect(checkIn.county == "Multnomah")      // case-insensitive
+        #expect(checkIn.state == "OR")              // whitespace-only counts as absent
+    }
+
+    /// A partially known operator takes what QRZ had and fills the rest.
+    @Test func partialRecordMixesKnownAndInherited() {
+        let partial = HamRecord(callSign: "K7DEF", name: "Dee Fox",
+                                street: "", city: "Salem", county: "Unknown", state: "")
+        let checkIn = sharing("K7DEF", record: partial)
+
+        #expect(checkIn.name == "Dee Fox")
+        #expect(checkIn.city == "Salem")            // known
+        #expect(checkIn.county == "Multnomah")      // inherited
+        #expect(checkIn.state == "OR")              // inherited
+    }
+
+    /// Everything the batch produces still flows into the report and the log.
+    @Test func sharedStationAppearsInReportAndLog() {
+        let checkIn = sharing("N7XYZ", record: nil, nickname: "Bob")
+        #expect(checkIn.tableRow == ["N7XYZ", "Unknown", "Bob", "Portland", "Multnomah", ""])
+        #expect(checkIn.logLine.contains("N7XYZ"))
+        #expect(checkIn.logLine.contains("(Bob)"))
+        #expect(checkIn.logLine.contains("Portland, Multnomah"))
+        // Per-net flags are not inherited from the host.
+        #expect(checkIn.hasAnnouncement == false)
+        #expect(checkIn.temporaryNotes.isEmpty)
+    }
+}
+
 @Suite("PDF text wrapping")
 struct WrapTests {
     /// The wrapping algorithm exactly as it was before the single-measurement
