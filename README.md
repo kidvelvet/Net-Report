@@ -183,7 +183,7 @@ Only needed once; afterwards it opens normally. If you prefer the command line,
 Verify your download against the SHA-256 published in the release notes:
 
 ```bash
-shasum -a 256 ~/Downloads/NetReport-1.0.0.dmg
+shasum -a 256 ~/Downloads/NetReport-<version>.dmg
 ```
 
 ## Build & run
@@ -202,7 +202,7 @@ bash scripts/build-app.sh
 open ~/Applications/NetReport.app
 
 # Build a distributable disk image in dist/ (uses only built-in macOS tools)
-VERSION=1.0.0 bash scripts/build-dmg.sh
+VERSION=1.2.0 bash scripts/build-dmg.sh
 ```
 
 The build script stages the bundle in `dist/` and then installs (replacing) it
@@ -210,6 +210,24 @@ into **`~/Applications`** on every run. `~/Applications` is used because this
 account can't write to the system `/Applications` without an admin password; to
 target the system folder instead, run with `INSTALL_DIR=/Applications` (needs
 write access there), or `SKIP_INSTALL=1` to build without installing.
+
+### Cutting a release
+
+`scripts/release.sh` does the whole thing in one command — checks, tests, disk
+image, tag, and a published GitHub release with the image attached:
+
+```bash
+bash scripts/release.sh 1.2.0
+bash scripts/release.sh 1.2.0 --dry-run              # check and build, publish nothing
+bash scripts/release.sh 1.2.0 --notes-file notes.md  # hand-written release notes
+```
+
+It refuses to publish from a dirty tree, an out-of-sync branch, a failing test
+run, or a version that already has a tag or release, and it only pushes the tag
+once the image has built. Without `--notes-file` it generates notes from the
+commit subjects since the previous tag, with the install, Gatekeeper, and
+checksum sections filled in automatically. Requires the
+[GitHub CLI](https://cli.github.com) (`gh auth login` once).
 
 `build-dmg.sh` produces `dist/NetReport-<version>.dmg` containing the app and an
 Applications shortcut, and prints the image's SHA-256 for the release notes. It
