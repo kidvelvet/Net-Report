@@ -200,12 +200,19 @@ public enum NetReportBuilder {
         checkIns: [CheckIn],
         trafficMessages: Int,
         outputDirectory: URL,
+        checkinListDirectory: URL? = nil,
+        netReportsDirectory: URL? = nil,
         database: NetDatabase,
         date: Date = Date()
     ) throws -> NetReportResult {
         let fm = FileManager.default
-        let checkinDir = outputDirectory.appendingPathComponent(checkinListFolder, isDirectory: true)
-        let netReportDir = outputDirectory.appendingPathComponent(netReportsFolder, isDirectory: true)
+        // Each kind of PDF can be sent somewhere of the operator's choosing;
+        // without an override they sit in their usual subfolder of the data
+        // folder.
+        let checkinDir = checkinListDirectory
+            ?? outputDirectory.appendingPathComponent(checkinListFolder, isDirectory: true)
+        let netReportDir = netReportsDirectory
+            ?? outputDirectory.appendingPathComponent(netReportsFolder, isDirectory: true)
         try fm.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
         try fm.createDirectory(at: checkinDir, withIntermediateDirectories: true)
         try fm.createDirectory(at: netReportDir, withIntermediateDirectories: true)

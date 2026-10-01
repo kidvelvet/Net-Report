@@ -98,7 +98,89 @@ final class NetSession {
 
     private static let dataFolderKey = "dataFolder"
     private static let setupCompleteKey = "hasCompletedFirstRunSetup"
+    private static let checkinListFolderKey = "checkinListFolder"
+    private static let netReportsFolderKey = "netReportsFolder"
     private var client: QRZClient?
+
+    // MARK: Report destinations
+
+    /// Where each kind of PDF is filed. Nil means "the usual subfolder of the
+    /// data folder", so the default keeps following the data folder around;
+    /// setting one pins that kind of report to a folder of its own.
+    private(set) var checkinListDirectoryOverride: URL?
+    private(set) var netReportsDirectoryOverride: URL?
+
+    /// The folder check-in lists are actually written to.
+    var checkinListDirectory: URL {
+        checkinListDirectoryOverride
+            ?? outputDirectory.appendingPathComponent(NetReportBuilder.checkinListFolder,
+                                                      isDirectory: true)
+    }
+
+    /// The folder net reports are actually written to.
+    var netReportsDirectory: URL {
+        netReportsDirectoryOverride
+            ?? outputDirectory.appendingPathComponent(NetReportBuilder.netReportsFolder,
+                                                      isDirectory: true)
+    }
+
+    /// Pick a folder for one kind of report. Passing nil restores the default.
+    func setCheckinListDirectory(_ url: URL?) {
+        checkinListDirectoryOverride = url
+        UserDefaults.standard.set(url, forKey: Self.checkinListFolderKey)
+        append(log: url == nil
+               ? "Check-in lists will use the default folder again."
+               : "Check-in lists will be saved to \(checkinListDirectory.path).")
+    }
+
+    func setNetReportsDirectory(_ url: URL?) {
+        netReportsDirectoryOverride = url
+        UserDefaults.standard.set(url, forKey: Self.netReportsFolderKey)
+        append(log: url == nil
+               ? "Net reports will use the default folder again."
+               : "Net reports will be saved to \(netReportsDirectory.path).")
+    }
+
+    func chooseCheckinListDirectoryInteractive() {
+        if let url = chooseFolder(titled: "Choose where check-in list PDFs are saved.",
+                                  startingAt: checkinListDirectory) {
+            setCheckinListDirectory(url)
+        }
+    }
+
+    func chooseNetReportsDirectoryInteractive() {
+        if let url = chooseFolder(titled: "Choose where net report PDFs are saved.",
+                                  startingAt: netReportsDirectory) {
+            setNetReportsDirectory(url)
+        }
+    }
+
+    /// Put both kinds of report back under the data folder.
+    func resetReportDirectories() {
+        setCheckinListDirectory(nil)
+        setNetReportsDirectory(nil)
+    }
+
+    private func chooseFolder(titled message: String, startingAt: URL) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = startingAt
+        panel.message = message
+        panel.prompt = "Use Folder"
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }
+
+    func revealCheckinListFolder() { reveal(checkinListDirectory) }
+    func revealNetReportsFolder() { reveal(netReportsDirectory) }
+
+    private func reveal(_ url: URL) {
+        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
 
     init() {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
@@ -114,6 +196,9 @@ final class NetSession {
         // attacker-influenced input that can make it fail.
         database = try! NetDatabase(path: ":memory:")
         userDatabase = try! UserDatabase(path: ":memory:")
+        checkinListDirectoryOverride = UserDefaults.standard.url(forKey: Self.checkinListFolderKey)
+        netReportsDirectoryOverride = UserDefaults.standard.url(forKey: Self.netReportsFolderKey)
+
         openDatabase(at: folder)
         restoreCredentials()
 
@@ -956,6 +1041,8 @@ final class NetSession {
                 checkIns: checkIns,
                 trafficMessages: trafficMessages,
                 outputDirectory: outputDirectory,
+                checkinListDirectory: checkinListDirectoryOverride,
+                netReportsDirectory: netReportsDirectoryOverride,
                 database: database
             )
             lastResult = result
@@ -976,6 +1063,51 @@ final class NetSession {
     func openNetReport() {
         guard let url = lastResult?.netReportURL else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    /// True when quitting now would lose work: there are check-ins logged and
+    /// no report has been generated for them yet.
+    var hasUnsavedNet: Bool {
+        netStarted && !checkIns.isEmpty && lastResult == nil
+    }
+
+    /// Write both PDFs for an in-progress net, for the "quit without closing the
+    /// net" case.
+    ///
+    /// Synchronous on purpose: this runs inside `applicationShouldTerminate`,
+    /// where there is nowhere to await. That means no QRZ round trip — the
+    /// receiving station is resolved from the local directory only — and a
+    /// missing receiving station is tolerated rather than refused, because
+    /// rescuing the check-in list matters more than a complete NTS form.
+    @discardableResult
+    func saveReportsBeforeQuitting() -> Bool {
+        guard !checkIns.isEmpty else { return true }
+        let receiver = receivingStation.trimmingCharacters(in: .whitespaces).uppercased()
+        let receivingRecord = userDatabase.find(callSign: receiver)?.record
+
+        do {
+            let result = try NetReportBuilder.generate(
+                userCallSign: operatorCallSign,
+                userRecord: operatorRecord,
+                receivingStation: receiver,
+                receivingRecord: receivingRecord,
+                receivingNickname: receivingNickname,
+                checkIns: checkIns,
+                trafficMessages: max(0, trafficMessages),
+                outputDirectory: outputDirectory,
+                checkinListDirectory: checkinListDirectoryOverride,
+                netReportsDirectory: netReportsDirectoryOverride,
+                database: database
+            )
+            lastResult = result
+            refreshSetupState()
+            append(log: "Saved on quit — check-in list: \(result.checkinListURL.path)")
+            append(log: "Saved on quit — net report: \(result.netReportURL.path)")
+            return true
+        } catch {
+            errorMessage = "Could not save the reports: \(error.localizedDescription)"
+            return false
+        }
     }
 
     func revealOutputFolder() {

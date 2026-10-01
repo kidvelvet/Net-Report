@@ -30,15 +30,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let alert = NSAlert()
         alert.messageText = "Quit Net Report?"
 
+        // A net with check-ins and no report yet is the only case where
+        // quitting loses work, so that is the only case that offers to save.
+        if let session = Self.session, session.hasUnsavedNet {
+            let n = session.totalCheckins
+            alert.alertStyle = .warning
+            alert.informativeText = "A net is in progress with \(n) check-in"
+                + "\(n == 1 ? "" : "s") and no report generated yet. Saving writes both the "
+                + "check-in list and the net report before quitting; the check-in list is "
+                + "otherwise discarded."
+            alert.addButton(withTitle: "Save Reports & Quit")
+            alert.addButton(withTitle: "Discard & Quit")
+            alert.addButton(withTitle: "Cancel")
+
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                // Don't quit on a failed save, or the work is lost anyway —
+                // the session surfaces why.
+                return session.saveReportsBeforeQuitting() ? .terminateNow : .terminateCancel
+            case .alertSecondButtonReturn:
+                return .terminateNow
+            default:
+                return .terminateCancel
+            }
+        }
+
         if let session = Self.session, session.netStarted, session.totalCheckins > 0 {
             let n = session.totalCheckins
-            let reported = session.lastResult != nil
-            alert.alertStyle = reported ? .informational : .warning
-            alert.informativeText = reported
-                ? "A net is still open with \(n) check-in\(n == 1 ? "" : "s"). Your report has "
-                  + "already been saved; the check-in list itself is not kept after quitting."
-                : "A net is in progress with \(n) check-in\(n == 1 ? "" : "s") and no report "
-                  + "generated yet. Quitting now discards the check-in list — this cannot be undone."
+            alert.alertStyle = .informational
+            alert.informativeText = "A net is still open with \(n) check-in"
+                + "\(n == 1 ? "" : "s"). Your reports are already saved; the check-in list "
+                + "itself is not kept after quitting."
         } else {
             alert.alertStyle = .informational
             alert.informativeText = "Your databases and saved reports are already on disk."
@@ -89,6 +111,21 @@ struct NetReportApp: App {
                 Divider()
 
                 Button("Choose Data Folder…") { session.chooseDataFolderInteractive() }
+
+                Menu("Report Destinations") {
+                    Button("Choose Check-in List Folder…") {
+                        session.chooseCheckinListDirectoryInteractive()
+                    }
+                    Button("Choose Net Reports Folder…") {
+                        session.chooseNetReportsDirectoryInteractive()
+                    }
+                    Divider()
+                    Button("Reveal Check-in List Folder") { session.revealCheckinListFolder() }
+                    Button("Reveal Net Reports Folder") { session.revealNetReportsFolder() }
+                    Divider()
+                    Button("Use Default Folders") { session.resetReportDirectories() }
+                }
+
                 Button("Import Net Reports from CSV…") { session.importReportCSVInteractive() }
                 Button("Import Operators from CSV…") { session.importUserCSVInteractive() }
 

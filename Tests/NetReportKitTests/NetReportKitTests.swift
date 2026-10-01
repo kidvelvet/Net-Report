@@ -806,6 +806,76 @@ struct ReportGenerationTests {
         #expect(second.messageNumber == first.messageNumber + 1)
     }
 
+    @Test func writesEachReportKindToItsChosenFolder() throws {
+        let out = tempDir()
+        let db = try NetDatabase(path: out.appendingPathComponent("db.sqlite").path)
+        let lists = tempDir().appendingPathComponent("Lists", isDirectory: true)
+        let reports = tempDir().appendingPathComponent("Radiograms", isDirectory: true)
+
+        let result = try NetReportBuilder.generate(
+            userCallSign: "W7SKW", userRecord: nil,
+            receivingStation: "W1AW", receivingRecord: nil,
+            checkIns: checkIns, trafficMessages: 1,
+            outputDirectory: out,
+            checkinListDirectory: lists,
+            netReportsDirectory: reports,
+            database: db, date: date(27))
+
+        #expect(result.checkinListURL.deletingLastPathComponent().path == lists.path)
+        #expect(result.netReportURL.deletingLastPathComponent().path == reports.path)
+        #expect(fileSize(result.checkinListURL) > 1000)
+        #expect(fileSize(result.netReportURL) > 1000)
+        // The folders are created on demand rather than having to exist first.
+        #expect(FileManager.default.fileExists(atPath: lists.path))
+    }
+
+    /// Omitting the overrides keeps the original layout under the data folder.
+    @Test func defaultsToSubfoldersOfTheDataFolder() throws {
+        let out = tempDir()
+        let db = try NetDatabase(path: out.appendingPathComponent("db.sqlite").path)
+        let result = try generate(in: out, db: db, at: 27)
+
+        #expect(result.checkinListURL.deletingLastPathComponent().lastPathComponent == "Checkin List")
+        #expect(result.netReportURL.deletingLastPathComponent().lastPathComponent == "Net Reports")
+        #expect(result.checkinListURL.deletingLastPathComponent()
+                    .deletingLastPathComponent().path == out.path)
+    }
+
+    /// Both PDFs are always produced together, whatever the destinations.
+    @Test func bothPDFsAreAlwaysWritten() throws {
+        let out = tempDir()
+        let db = try NetDatabase(path: out.appendingPathComponent("db.sqlite").path)
+        let result = try generate(in: out, db: db, at: 27)
+
+        #expect(FileManager.default.fileExists(atPath: result.checkinListURL.path))
+        #expect(FileManager.default.fileExists(atPath: result.netReportURL.path))
+        #expect(result.checkinListURL.lastPathComponent.hasPrefix("checkin_list_"))
+        #expect(result.netReportURL.lastPathComponent.hasPrefix("net_report_"))
+    }
+
+    /// The quit-time rescue save runs on a net that was never closed, so the
+    /// receiving station may never have been filled in. Both PDFs must still be
+    /// produced rather than the whole save failing.
+    @Test func generatesWithNoReceivingStation() throws {
+        let out = tempDir()
+        let db = try NetDatabase(path: out.appendingPathComponent("db.sqlite").path)
+
+        let result = try NetReportBuilder.generate(
+            userCallSign: "W7SKW", userRecord: nil,
+            receivingStation: "", receivingRecord: nil,
+            checkIns: checkIns, trafficMessages: 0,
+            outputDirectory: out, database: db, date: date(27))
+
+        #expect(fileSize(result.checkinListURL) > 1000)
+        #expect(fileSize(result.netReportURL) > 1000)
+        #expect(result.totalCheckins == checkIns.count)
+        // The radiogram simply carries an empty TO field.
+        #expect(result.nts.toStation.isEmpty)
+        // And it is still logged, so the message number advances as usual.
+        #expect(db.reportCount() == 1)
+        #expect(db.nextMessageNumber() == result.messageNumber + 1)
+    }
+
     @Test func honoursStartingNumber() throws {
         let out = tempDir()
         let db = try NetDatabase(path: out.appendingPathComponent("db.sqlite").path)

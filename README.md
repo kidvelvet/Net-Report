@@ -31,6 +31,10 @@ CLI, with the interactive prompt loop replaced by a real macOS interface.
 - **NTS Receiving Station checkbox** — tick it on any check-in and that operator
   becomes the station receiving the NTS form; their call sign and nickname fill
   the report automatically.
+- **Nothing is lost on quit** — quitting with check-ins logged but no report
+  generated offers **Save Reports & Quit**, which writes both PDFs first. The
+  check-in list lives only in memory until a report is generated, so this is the
+  one place work could otherwise disappear.
 - **Announcements** — tick **Announcement** in the add/edit window to flag a
   station with an announcement or QST. Flagged rows get a 📣 marker in the
   check-in table and a `★ ANNOUNCEMENT` marker in the activity log, and
@@ -79,7 +83,14 @@ Output is written under the data folder (default **`~/Documents/Net Report/`**):
 ```
 
 Each report carries a date **and time** stamp, so generating a new report never
-overwrites an earlier one.
+overwrites an earlier one. **Generating a report always writes both PDFs** — the
+check-in list and the net report together.
+
+Either kind can be filed somewhere else entirely: **File ▸ Report Destinations**
+chooses a folder for check-in lists and another for net reports independently
+(with *Use Default Folders* to put them back under the data folder). Handy for
+sending net reports straight into a synced folder the NTS liaison can see while
+keeping check-in lists local.
 
 ## First-run setup
 
