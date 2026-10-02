@@ -322,7 +322,7 @@ public final class UserDatabase: SQLiteStore {
     /// Returns the number of operators imported.
     @discardableResult
     public func importCSV(from url: URL, at date: Date = Date()) throws -> Int {
-        let contents = try String(contentsOf: url, encoding: .utf8)
+        let contents = try SQLiteStore.readImportFile(url)
         let lines = contents.split(whereSeparator: \.isNewline).map(String.init)
         guard let headerLine = lines.first else { return 0 }
 

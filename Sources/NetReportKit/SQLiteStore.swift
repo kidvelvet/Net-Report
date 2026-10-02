@@ -53,6 +53,15 @@ public class SQLiteStore {
     public init(path: String) throws {
         self.path = path
         var handle: OpaquePointer?
+        // The data folder may be a share others can write to, and a symlink
+        // planted in place of a database would send our writes into whatever
+        // SQLite file it points at. Only the file itself is checked: folders
+        // above it are often legitimately symlinked (/var, synced folders), which
+        // is why SQLITE_OPEN_NOFOLLOW — it rejects any link in the path — isn't used.
+        if let type = try? FileManager.default.attributesOfItem(atPath: path)[.type] as? FileAttributeType,
+           type == .typeSymbolicLink {
+            throw DatabaseError.open("\(path) is a symbolic link, not a database file.")
+        }
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
         guard sqlite3_open_v2(path, &handle, flags, nil) == SQLITE_OK, handle != nil else {
             let message = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unknown error"
@@ -64,11 +73,16 @@ public class SQLiteStore {
         // busy timeout, a read that overlaps another machine's write fails at
         // once with "database is locked"; with one, it waits its turn.
         sqlite3_busy_timeout(handle, Self.busyTimeoutMilliseconds)
-        try exec("PRAGMA foreign_keys=ON;")
         // SQLite's documented mitigation against hostile schema in a file we
         // didn't write: stops schema objects from invoking functions that would
-        // otherwise be usable from a crafted database.
-        try? exec("PRAGMA trusted_schema=OFF;")
+        // otherwise be usable from a crafted database. Set before anything
+        // reads the schema.
+        try exec("PRAGMA trusted_schema=OFF;")
+        try exec("PRAGMA foreign_keys=ON;")
+        // The same rule a restored backup must pass, for the database files
+        // themselves: a file dropped into a shared data folder must not bring
+        // triggers that fire on this app's own writes.
+        try Self.requireNoExecutableSchema(handle!, describing: "The database at \(path)")
     }
 
     /// How long a statement waits for another connection's lock to clear.
@@ -130,12 +144,13 @@ public class SQLiteStore {
             throw DatabaseError.open(message)
         }
         defer { sqlite3_close(src) }
+        sqlite3_exec(src, "PRAGMA trusted_schema=OFF;", nil, nil, nil)
 
         // Everything below runs against the *source* and must pass before a
         // single page is copied, because a restore replaces this database
         // wholesale — schema included.
         try Self.requireIntact(src)
-        try Self.requireNoExecutableSchema(src)
+        try Self.requireNoExecutableSchema(src, describing: "That database")
         try Self.requireTable(table, columns: columns, in: src)
 
         guard let restore = sqlite3_backup_init(db, "main", src, "main") else {
@@ -147,6 +162,20 @@ public class SQLiteStore {
         guard result == SQLITE_OK else {
             throw DatabaseError.sql("Could not copy that backup (SQLite error \(result)).")
         }
+    }
+
+    /// Largest CSV we will import. A real roster or report log is kilobytes;
+    /// this stops a wrong or crafted file from being read whole into memory.
+    static let maxImportBytes = 32 * 1024 * 1024
+
+    /// Read a CSV for import, refusing anything far larger than a real one.
+    static func readImportFile(_ url: URL) throws -> String {
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? Int,
+           size > maxImportBytes {
+            throw DatabaseError.sql("That file is far larger than a Net Report CSV "
+                                    + "should be, so it has not been imported.")
+        }
+        return try String(contentsOf: url, encoding: .utf8)
     }
 
     /// Largest backup file we will even open. Far beyond any real net log, and
@@ -172,7 +201,7 @@ public class SQLiteStore {
     /// install triggers or views that then fire on this app's own writes.
     /// Net Report's databases are plain tables and indexes; anything else means
     /// the file wasn't produced by Back Up…
-    private static func requireNoExecutableSchema(_ src: OpaquePointer) throws {
+    private static func requireNoExecutableSchema(_ src: OpaquePointer, describing what: String) throws {
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(
             src, "SELECT count(*) FROM sqlite_master WHERE type IN ('trigger','view');",
@@ -181,8 +210,8 @@ public class SQLiteStore {
         }
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_int64(stmt, 0) == 0 else {
-            throw DatabaseError.sql("That database defines triggers or views, which a "
-                                    + "Net Report backup never does. It has not been imported.")
+            throw DatabaseError.sql("\(what) defines triggers or views, which Net Report "
+                                    + "never creates, so it has not been opened.")
         }
     }
 

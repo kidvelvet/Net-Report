@@ -481,7 +481,10 @@ final class NetSession {
     private func refreshSetupState() {
         refreshCounts()
         // Reuse the count just taken instead of running another COUNT(*).
-        needsDatabaseSetup = reportCount == 0 && !database.isSetupDone()
+        // Not while running on the in-memory fallback: the real log couldn't be
+        // opened, and a starting number entered into a throwaway database would
+        // be silently lost — the banner explaining the failure is the prompt.
+        needsDatabaseSetup = databaseError == nil && reportCount == 0 && !database.isSetupDone()
     }
 
     /// Point the app at a different data folder (local, synced, or on a network

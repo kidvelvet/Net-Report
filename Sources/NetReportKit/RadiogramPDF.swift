@@ -36,14 +36,27 @@ public enum RadiogramPDF {
     private static let pageHeight: CGFloat = 792
     private static let margin: CGFloat = 36
 
-    public enum PDFError: Error { case contextCreationFailed }
+    public enum PDFError: Error, LocalizedError {
+        case contextCreationFailed
+        case noFreeFilename(String)
+
+        public var errorDescription: String? {
+            switch self {
+            case .contextCreationFailed: return "Could not create the PDF."
+            case .noFreeFilename(let name): return "Could not find a free filename for \(name)."
+            }
+        }
+    }
 
     /// PDF of the check-in table only (title + generation stamp + table).
+    /// Returns where it was written: `url`, or a numbered sibling if `url` is
+    /// already taken (see `writeNewFile`).
+    @discardableResult
     public static func writeCheckinList(
         to url: URL,
         tableRows: [[String]],
         generatedAt: Date = Date()
-    ) throws {
+    ) throws -> URL {
         try render(to: url) { ctx in
             drawString("Ham Radio Check-in Report", x: margin, y: pageHeight - margin,
                        font: bold(16), in: ctx)
@@ -59,12 +72,13 @@ public enum RadiogramPDF {
         }
     }
 
-    /// PDF of the ARRL radiogram / NTS form only.
+    /// PDF of the ARRL radiogram / NTS form only. Returns where it was written.
+    @discardableResult
     public static func writeNetReport(
         to url: URL,
         nts: NTSForm,
         generatedAt: Date = Date()
-    ) throws {
+    ) throws -> URL {
         try render(to: url) { ctx in
             let usableWidth = pageWidth - (2 * margin)
             drawString("Net Report — Generated: \(generationStamp(generatedAt))",
@@ -74,16 +88,44 @@ public enum RadiogramPDF {
         }
     }
 
-    /// Shared single-page PDF context setup/teardown.
-    private static func render(to url: URL, _ body: (CGContext) -> Void) throws {
+    /// Draw the document in memory, then create its file — never replacing one.
+    private static func render(to url: URL, _ body: (CGContext) -> Void) throws -> URL {
+        let data = NSMutableData()
         var mediaBox = CGRect(x: 0, y: 0, width: pageWidth, height: pageHeight)
-        guard let ctx = CGContext(url as CFURL, mediaBox: &mediaBox, nil) else {
+        guard let consumer = CGDataConsumer(data: data as CFMutableData),
+              let ctx = CGContext(consumer: consumer, mediaBox: &mediaBox, nil) else {
             throw PDFError.contextCreationFailed
         }
         beginPage(ctx)
         body(ctx)
         ctx.endPDFPage()
         ctx.closePDF()
+        return try writeNewFile(data as Data, preferredURL: url)
+    }
+
+    /// Write `data` to a file that did not exist before: `url` itself, else
+    /// `name-2.pdf`, `name-3.pdf`, ….
+    ///
+    /// Report folders can sit on a share other people can write to, and report
+    /// names are predictable. Writing through `CGContext(url:)` would follow a
+    /// symlink planted at the next name and overwrite whatever it points at.
+    /// `.withoutOverwriting` opens with `O_CREAT | O_EXCL`, which refuses an
+    /// existing file *and* any symlink, so a report only ever creates a file.
+    static func writeNewFile(_ data: Data, preferredURL url: URL) throws -> URL {
+        let folder = url.deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        for attempt in 1...100 {
+            let candidate = attempt == 1 ? url
+                : folder.appendingPathComponent("\(stem)-\(attempt)").appendingPathExtension(ext)
+            do {
+                try data.write(to: candidate, options: .withoutOverwriting)
+                return candidate
+            } catch let error as CocoaError where error.code == .fileWriteFileExists {
+                continue
+            }
+        }
+        throw PDFError.noFreeFilename(url.lastPathComponent)
     }
 
     /// Start a page with the drawing state every page expects.

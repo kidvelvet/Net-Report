@@ -232,13 +232,16 @@ public enum NetReportBuilder {
             date: date
         )
 
-        let checkinURL = checkinDir.appendingPathComponent(checkinListFilename(for: date))
-        let netReportURL = netReportDir.appendingPathComponent(netReportFilename(for: date))
-
         let header = ["Call Sign", "Name", "Nickname", "City", "County", "Notes"]
         let rows = [header] + checkIns.map(\.tableRow)
-        try RadiogramPDF.writeCheckinList(to: checkinURL, tableRows: rows, generatedAt: date)
-        try RadiogramPDF.writeNetReport(to: netReportURL, nts: nts, generatedAt: date)
+        // The writers report where each file actually went: never over an
+        // existing file, so a taken name gets a numbered sibling instead.
+        let checkinURL = try RadiogramPDF.writeCheckinList(
+            to: checkinDir.appendingPathComponent(checkinListFilename(for: date)),
+            tableRows: rows, generatedAt: date)
+        let netReportURL = try RadiogramPDF.writeNetReport(
+            to: netReportDir.appendingPathComponent(netReportFilename(for: date)),
+            nts: nts, generatedAt: date)
 
         // Log the net report (radiogram) as the recorded artifact, matching the
         // single pdf_file column the original CSV used.

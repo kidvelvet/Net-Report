@@ -212,7 +212,7 @@ public final class NetDatabase: SQLiteStore {
     /// same file twice doesn't double every report. Marks first-run setup complete.
     @discardableResult
     public func importCSV(from url: URL) throws -> Int {
-        let contents = try String(contentsOf: url, encoding: .utf8)
+        let contents = try SQLiteStore.readImportFile(url)
         let lines = contents.split(whereSeparator: \.isNewline).map(String.init)
 
         // Compile the INSERT once and re-bind per row, rather than re-preparing

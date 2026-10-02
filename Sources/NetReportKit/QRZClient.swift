@@ -69,13 +69,29 @@ public actor QRZClient {
     private var sessionKey = ""
     private let session: URLSession
 
-    public init(username: String, password: String, session: URLSession = .shared) {
+    /// Lookups return operators' names and addresses. An ephemeral session
+    /// keeps those responses (and any cookies) in memory only, where the shared
+    /// session would write them to the app's on-disk URL cache.
+    public static let ephemeralSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        config.httpCookieStorage = nil
+        config.httpShouldSetCookies = false
+        return URLSession(configuration: config)
+    }()
+
+    /// Far beyond any real QRZ reply (a few kilobytes), so a hostile or broken
+    /// endpoint can't make the parser buffer an arbitrarily large body.
+    static let maxResponseBytes = 1 << 20
+
+    public init(username: String, password: String, session: URLSession = QRZClient.ephemeralSession) {
         self.username = username
         self.password = password
         self.session = session
     }
 
-    public init(credentials: QRZCredentials, session: URLSession = .shared) {
+    public init(credentials: QRZCredentials, session: URLSession = QRZClient.ephemeralSession) {
         self.init(username: credentials.username,
                   password: credentials.password,
                   session: session)
@@ -170,6 +186,9 @@ public actor QRZClient {
         // session key — say what actually happened.
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             throw QRZError.network("QRZ returned HTTP \(http.statusCode).")
+        }
+        guard data.count <= Self.maxResponseBytes else {
+            throw QRZError.network("QRZ sent an unexpectedly large reply; it was ignored.")
         }
         return QRZResponseParser().parse(data)
     }

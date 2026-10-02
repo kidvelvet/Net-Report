@@ -34,7 +34,9 @@ PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ"
 APP="$PROJ/dist/NetReport.app"
 ID="${BUNDLE_ID:-com.w7skw.netreport}"
-VER="${VERSION:-1.0.0}"
+# Default to the latest release tag, so a local build's About box is right.
+VER="${VERSION:-$(git -C "$PROJ" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+VER="${VER:-0.0.0}"
 
 echo "== 1/4 release build =="
 swift build -c release --product NetReport
@@ -61,8 +63,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 </dict></plist>
 PLIST
 
-echo "== 3/4 ad-hoc sign =="
-codesign --force --sign - "$APP"
+echo "== 3/4 ad-hoc sign (hardened runtime) =="
+# The hardened runtime refuses injected libraries (DYLD_INSERT_LIBRARIES) and
+# unsigned code, and blocks debuggers from attaching — protecting the QRZ
+# password while the app holds it. The app needs no runtime exceptions: it
+# links only system frameworks and uses no JIT or plug-ins.
+codesign --force --options runtime --sign - "$APP"
 
 # Install (replace) into the user Applications folder on every build.
 # ~/Applications is used instead of /Applications because it needs no admin

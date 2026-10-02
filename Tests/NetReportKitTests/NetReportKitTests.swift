@@ -251,6 +251,40 @@ struct DatabaseTests {
         #expect(try live.allReports().first?.userCallSign == "W7SKW")
     }
 
+    /// The same rule for the live database files: one dropped into a shared
+    /// data folder must not bring a trigger that fires on the app's writes.
+    @Test func openingADatabaseWithTriggersIsRefused() throws {
+        let path = tempDir().appendingPathComponent("netreport.sqlite").path
+        do {
+            let planted = try NetDatabase(path: path)
+            try planted.exec("""
+                CREATE TRIGGER poison AFTER INSERT ON net_reports BEGIN
+                  UPDATE net_reports SET user_call_sign = 'PWNED';
+                END;
+                """)
+        }
+        #expect(throws: DatabaseError.self) { _ = try NetDatabase(path: path) }
+    }
+
+    /// A symlink in place of a database must not redirect the app's writes.
+    @Test func databaseOpenDoesNotFollowSymlinks() throws {
+        let dir = tempDir()
+        let target = dir.appendingPathComponent("elsewhere.sqlite")
+        _ = try NetDatabase(path: target.path)
+        let link = dir.appendingPathComponent("netreport.sqlite")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        #expect(throws: DatabaseError.self) { _ = try NetDatabase(path: link.path) }
+    }
+
+    @Test func oversizedCSVIsNotRead() throws {
+        let url = tempDir().appendingPathComponent("huge.csv")
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.truncate(atOffset: UInt64(SQLiteStore.maxImportBytes + 1))   // sparse: instant
+        try handle.close()
+        #expect(throws: DatabaseError.self) { try newDB().importCSV(from: url) }
+    }
+
     /// A table of the right name but the wrong shape would restore "successfully"
     /// and then break every query, with Erase All as the only way out.
     @Test func restoreRejectsWrongColumns() throws {
@@ -1113,6 +1147,36 @@ struct UnknownStationTests {
     }
 }
 
+@Suite("Report files")
+struct ReportFileTests {
+    /// Report names are predictable and the folder may be shared, so a symlink
+    /// planted at the next name must not turn a report into an overwrite.
+    @Test func neverWritesThroughASymlink() throws {
+        let dir = tempDir()
+        let victim = dir.appendingPathComponent("victim.txt")
+        try "precious".write(to: victim, atomically: true, encoding: .utf8)
+        let planned = dir.appendingPathComponent("checkin_list_20260221_200027.pdf")
+        try FileManager.default.createSymbolicLink(at: planned, withDestinationURL: victim)
+
+        let written = try RadiogramPDF.writeCheckinList(
+            to: planned, tableRows: [["Call Sign", "Name", "Nickname", "City", "County", "Notes"]])
+
+        #expect(try String(contentsOf: victim, encoding: .utf8) == "precious")
+        #expect(written.lastPathComponent == "checkin_list_20260221_200027-2.pdf")
+        #expect(fileSize(written) > 500)
+    }
+
+    @Test func neverReplacesAnExistingReport() throws {
+        let url = tempDir().appendingPathComponent("net_report_x.pdf")
+        let data = Data("first".utf8)
+        let first = try RadiogramPDF.writeNewFile(data, preferredURL: url)
+        let second = try RadiogramPDF.writeNewFile(Data("second".utf8), preferredURL: url)
+        #expect(first == url)
+        #expect(second.lastPathComponent == "net_report_x-2.pdf")
+        #expect(try Data(contentsOf: url) == data)
+    }
+}
+
 @Suite("Check-in list pagination")
 struct PaginationTests {
     private let header = ["Call Sign", "Name", "Nickname", "City", "County", "Notes"]
@@ -1143,6 +1207,48 @@ struct PaginationTests {
     @Test func hugeNoteIsCappedRatherThanOverflowing() throws {
         let huge = String(repeating: "word ", count: 400)
         #expect(try pages(3, note: huge) <= 3)
+    }
+}
+
+/// Serves one canned body to every request, so the client can be exercised
+/// without the network.
+final class StubProtocol: URLProtocol {
+    nonisolated(unsafe) static var body = Data()
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200,
+                                       httpVersion: nil, headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Self.body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
+@Suite("QRZ client", .serialized)
+struct QRZClientTests {
+    private func client() -> QRZClient {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubProtocol.self]
+        return QRZClient(username: "K7XYZ", password: "pw", session: URLSession(configuration: config))
+    }
+
+    @Test func oversizedReplyIsRefused() async {
+        StubProtocol.body = Data(repeating: UInt8(ascii: " "), count: QRZClient.maxResponseBytes + 1)
+        await #expect(throws: QRZError.self) { try await client().login() }
+    }
+
+    @Test func normalReplyStillWorks() async throws {
+        StubProtocol.body = Data("<QRZDatabase><Session><Key>abc</Key></Session></QRZDatabase>".utf8)
+        try await client().login()
+    }
+
+    /// Lookups carry names and addresses; the default session must not cache.
+    @Test func defaultSessionKeepsNothingOnDisk() {
+        let config = QRZClient.ephemeralSession.configuration
+        #expect(config.urlCache == nil)
+        #expect(config.httpCookieStorage == nil)
     }
 }
 

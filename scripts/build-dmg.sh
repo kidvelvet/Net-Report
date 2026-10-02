@@ -39,7 +39,9 @@ set -euo pipefail
 PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ"
 
-VER="${VERSION:-1.0.0}"
+# Default to the latest release tag, so a local build's About box is right.
+VER="${VERSION:-$(git -C "$PROJ" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')}"
+VER="${VER:-0.0.0}"
 APP="$PROJ/dist/NetReport.app"
 STAGE="$PROJ/dist/dmg-stage"
 DMG="$PROJ/dist/NetReport-$VER.dmg"
