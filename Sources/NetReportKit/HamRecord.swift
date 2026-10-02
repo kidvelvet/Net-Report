@@ -191,7 +191,7 @@ public struct CheckIn: Sendable, Equatable, Identifiable {
     /// Multi-line summary for the activity log, which net control reads from
     /// during the net — so it carries both kinds of note, labelled.
     public var logLine: String {
-        var line = "\(callSign) — \(name)"
+        var line = "\(callSign) — \(name.meaningful ?? "Unknown")"
         if !nickname.isEmpty { line += " (\(nickname))" }
         let place = [city, county].filter { !$0.isEmpty }.joined(separator: ", ")
         if !place.isEmpty { line += " · \(place)" }

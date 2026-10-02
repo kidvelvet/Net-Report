@@ -144,7 +144,6 @@ private struct QRZStep: View {
     @State private var username = ""
     @State private var password = ""
     @State private var saveToKeychain = true
-    @State private var signInFailed = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {

@@ -89,8 +89,8 @@ final class CloseProxy: NSObject, NSWindowDelegate {
     var forwardee: NSWindowDelegate?
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // With more than one main window open (File ▸ New Net Report Window),
-        // closing one should just close it. Identify siblings by the delegate
+        // Should more than one main window ever be open, closing one should
+        // just close it. Identify siblings by the delegate
         // type actually installed on them rather than by title, which any
         // auxiliary window could collide with.
         let siblings = NSApplication.shared.windows.filter {

@@ -60,12 +60,19 @@ public class SQLiteStore {
             throw DatabaseError.open(message)
         }
         db = handle
+        // The databases can live on a share used by several Macs. Without a
+        // busy timeout, a read that overlaps another machine's write fails at
+        // once with "database is locked"; with one, it waits its turn.
+        sqlite3_busy_timeout(handle, Self.busyTimeoutMilliseconds)
         try exec("PRAGMA foreign_keys=ON;")
         // SQLite's documented mitigation against hostile schema in a file we
         // didn't write: stops schema objects from invoking functions that would
         // otherwise be usable from a crafted database.
         try? exec("PRAGMA trusted_schema=OFF;")
     }
+
+    /// How long a statement waits for another connection's lock to clear.
+    static let busyTimeoutMilliseconds: Int32 = 5_000
 
     deinit {
         sqlite3_close(db)

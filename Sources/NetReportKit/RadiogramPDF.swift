@@ -54,8 +54,8 @@ public enum RadiogramPDF {
             // usable width (612 - 2×36 = 540pt).
             let colWidths: [CGFloat] = [70, 110, 70, 80, 80, 130]
             let tableTop = pageHeight - margin - 35
-            _ = drawTable(tableRows, colWidths: colWidths,
-                          originX: margin, topY: tableTop, in: ctx)
+            drawTable(tableRows, colWidths: colWidths, originX: margin, topY: tableTop,
+                      continuationTitle: "Ham Radio Check-in Report (continued)", in: ctx)
         }
     }
 
@@ -80,13 +80,18 @@ public enum RadiogramPDF {
         guard let ctx = CGContext(url as CFURL, mediaBox: &mediaBox, nil) else {
             throw PDFError.contextCreationFailed
         }
+        beginPage(ctx)
+        body(ctx)
+        ctx.endPDFPage()
+        ctx.closePDF()
+    }
+
+    /// Start a page with the drawing state every page expects.
+    private static func beginPage(_ ctx: CGContext) {
         ctx.beginPDFPage(nil)
         ctx.textMatrix = .identity
         ctx.setFillColor(black)
         ctx.setStrokeColor(black)
-        body(ctx)
-        ctx.endPDFPage()
-        ctx.closePDF()
     }
 
     /// Built once — configured formatters are reusable and costly to create.
@@ -103,14 +108,22 @@ public enum RadiogramPDF {
 
     // MARK: - Table
 
-    /// Draws the table top-down from `topY` and returns its total height.
+    /// Draws the table from `topY`, continuing onto as many pages as it needs.
+    /// The header row repeats on every page, and pages are numbered when there
+    /// is more than one.
+    ///
+    /// Before this paginated, the whole table went on one page and every row
+    /// past the bottom margin — roughly the 34th check-in onward — was simply
+    /// missing from the PDF, though the radiogram still counted it.
     private static func drawTable(
         _ rows: [[String]],
         colWidths: [CGFloat],
         originX: CGFloat,
         topY: CGFloat,
+        continuationTitle: String,
         in ctx: CGContext
-    ) -> CGFloat {
+    ) {
+        guard !rows.isEmpty else { return }
         let fontSize: CGFloat = 9
         let padding: CGFloat = 4
         let lineHeight: CGFloat = 12
@@ -118,57 +131,92 @@ public enum RadiogramPDF {
         let headerFont = bold(fontSize)
         let ascent = CTFontGetAscent(cellFont)
 
+        // Room kept at the foot of every page for its page number.
+        let bottom = margin + 16
+        // Continuation pages carry a one-line title, then the table.
+        let continuationTop = pageHeight - margin - 24
+        // Cap a cell so even the tallest row fits on a fresh page beneath the
+        // repeated header — otherwise a single huge cell could never be placed.
+        let headerReserve = lineHeight + 2 * padding
+        let maxLines = max(1, Int((continuationTop - bottom - headerReserve - 2 * padding) / lineHeight))
+
         // Pre-wrap every cell and compute each row's height.
         var wrapped: [[[String]]] = []
         var rowHeights: [CGFloat] = []
         for row in rows {
             var wrappedRow: [[String]] = []
-            var maxLines = 1
+            var tallest = 1
             for (col, cell) in row.enumerated() {
                 // Defensive: a row longer than the column spec would otherwise
                 // index out of bounds and crash the report.
                 guard col < colWidths.count else { break }
-                let width = colWidths[col] - (2 * padding)
-                let lines = wrap(cell, font: cellFont, maxWidth: width)
+                var lines = wrap(cell, font: cellFont, maxWidth: colWidths[col] - (2 * padding))
+                if lines.count > maxLines {
+                    lines = Array(lines.prefix(maxLines))
+                    lines[maxLines - 1] += "…"
+                }
                 wrappedRow.append(lines)
-                maxLines = max(maxLines, lines.count)
+                tallest = max(tallest, lines.count)
             }
             wrapped.append(wrappedRow)
-            rowHeights.append(CGFloat(maxLines) * lineHeight + (2 * padding))
+            rowHeights.append(CGFloat(tallest) * lineHeight + (2 * padding))
         }
 
-        ctx.setLineWidth(0.6)
-        var y = topY
-        for (rowIndex, wrappedRow) in wrapped.enumerated() {
-            let rowHeight = rowHeights[rowIndex]
-            let rowTop = y
-            let rowBottom = y - rowHeight
+        // Lay the data rows out into pages first, so each page can say "of N".
+        var pages: [[Int]] = [[]]
+        var y = topY - rowHeights[0]
+        for index in wrapped.indices.dropFirst() {
+            if y - rowHeights[index] < bottom, !pages[pages.count - 1].isEmpty {
+                pages.append([])
+                y = continuationTop - rowHeights[0]
+            }
+            pages[pages.count - 1].append(index)
+            y -= rowHeights[index]
+        }
 
+        /// Draw one row with its top edge at `top`; returns its bottom edge.
+        func drawRow(_ index: Int, top: CGFloat) -> CGFloat {
+            let rowHeight = rowHeights[index]
+            let rowBottom = top - rowHeight
             var x = originX
-            for (col, lines) in wrappedRow.enumerated() {
+            for (col, lines) in wrapped[index].enumerated() {
                 guard col < colWidths.count else { break }
                 let cellWidth = colWidths[col]
-
-                // Header shading.
-                if rowIndex == 0 {
+                if index == 0 {                       // header shading
                     ctx.setFillColor(lightGrey)
                     ctx.fill(CGRect(x: x, y: rowBottom, width: cellWidth, height: rowHeight))
                     ctx.setFillColor(black)
                 }
-                // Cell border.
                 ctx.stroke(CGRect(x: x, y: rowBottom, width: cellWidth, height: rowHeight))
-
-                // Cell text, top-aligned.
-                let font = rowIndex == 0 ? headerFont : cellFont
+                let font = index == 0 ? headerFont : cellFont
                 for (i, text) in lines.enumerated() {
-                    let baseline = rowTop - padding - ascent - (CGFloat(i) * lineHeight)
+                    let baseline = top - padding - ascent - (CGFloat(i) * lineHeight)
                     drawString(text, x: x + padding, y: baseline, font: font, in: ctx)
                 }
                 x += cellWidth
             }
-            y = rowBottom
+            return rowBottom
         }
-        return topY - y
+
+        for (pageIndex, page) in pages.enumerated() {
+            var top = topY
+            if pageIndex > 0 {
+                ctx.endPDFPage()
+                beginPage(ctx)
+                drawString(continuationTitle, x: margin, y: pageHeight - margin,
+                           font: bold(11), in: ctx)
+                top = continuationTop
+            }
+            // Graphics state resets with each page, so set the rule weight here.
+            ctx.setLineWidth(0.6)
+            top = drawRow(0, top: top)               // header repeats on every page
+            for index in page { top = drawRow(index, top: top) }
+
+            if pages.count > 1 {
+                drawCentred("Page \(pageIndex + 1) of \(pages.count)",
+                            centerX: pageWidth / 2, y: margin, font: regular(8), in: ctx)
+            }
+        }
     }
 
     // MARK: - Radiogram form (port of draw_radiogram_form)

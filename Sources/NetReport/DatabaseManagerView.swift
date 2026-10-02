@@ -57,6 +57,7 @@ struct DatabaseManagerView: View {
         .frame(minWidth: 640, minHeight: 380)
         .onAppear(perform: reload)
         .onChange(of: kind) { _, _ in reload() }
+        .onChange(of: session.databaseRevision) { _, _ in reload() }
         .sheet(item: $editingOperator) { entry in
             OperatorEditorView(entry: entry) { updated in
                 session.saveOperator(updated)

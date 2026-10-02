@@ -47,6 +47,9 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         CheckInEntry()
                         CheckInTable(selection: $selection)
+                            // A new net's rows are all new; don't carry a
+                            // selection of rows that no longer exist.
+                            .onChange(of: session.netStarted) { _, _ in selection = [] }
                     }
                     .padding(12)
                     .frame(minWidth: 460)
@@ -83,43 +86,43 @@ struct ContentView: View {
                     .padding(.bottom, 8)
             }
         }
-        .alert("Notice",
-               isPresented: Binding(
-                   get: { session.errorMessage != nil },
-                   set: { if !$0 { session.errorMessage = nil } }
-               )) {
-            Button("OK", role: .cancel) { session.errorMessage = nil }
-        } message: {
-            Text(session.errorMessage ?? "")
-        }
+        // While a sheet is up the window can't show an alert of its own — it
+        // would wait, invisibly, until the sheet closed — so the sheet shows it.
+        .sessionAlert(when: activeSheet == nil)
         .sheet(item: Binding(
             get: { activeSheet },
             set: { newValue in
                 // Only one sheet shows at a time; dismissing means "skip this step".
                 guard newValue == nil else { return }
-                // Dismissing a step means "skip it".
-                if session.needsFirstRunSetup { session.completeFirstRunSetup() }
-                else if session.needsCredentials { session.dismissCredentialsPrompt() }
-                else if session.needsDatabaseSetup { session.skipSetup() }
-                else { session.dismissEditor() }
+                switch activeSheet {
+                case .checkInEditor:  session.dismissEditor()
+                case .firstRunSetup:  session.completeFirstRunSetup()
+                case .credentials:    session.dismissCredentialsPrompt()
+                case .databaseSetup:  session.skipSetup()
+                case nil:             break
+                }
             }
         )) { sheet in
-            switch sheet {
-            case .firstRunSetup:      SetupWizardView()
-            case .credentials:        QRZSignInView()
-            case .databaseSetup:      DatabaseSetupView()
-            case .checkInEditor(let target): CheckInEditorView(target: target)
+            Group {
+                switch sheet {
+                case .firstRunSetup:      SetupWizardView()
+                case .credentials:        QRZSignInView()
+                case .databaseSetup:      DatabaseSetupView()
+                case .checkInEditor(let target): CheckInEditorView(target: target)
+                }
             }
+            .sessionAlert(when: true)
         }
     }
 
-    /// First-run setup wins over everything; then the one-off prompts; then the
-    /// check-in editor.
+    /// An open check-in editor wins: swapping another sheet in would discard
+    /// everything typed into it. Whatever else was asked for (a QRZ sign-in
+    /// from the File menu, say) appears as soon as the editor closes.
     private var activeSheet: ActiveSheet? {
+        if let target = session.editorTarget { return .checkInEditor(target) }
         if session.needsFirstRunSetup { return .firstRunSetup }
         if session.needsCredentials { return .credentials }
         if session.needsDatabaseSetup { return .databaseSetup }
-        if let target = session.editorTarget { return .checkInEditor(target) }
         return nil
     }
 
@@ -136,6 +139,30 @@ struct ContentView: View {
             case .databaseSetup:          return "databaseSetup"
             case .checkInEditor(let t):   return "editor-\(t.id)"
             }
+        }
+    }
+}
+
+private extension View {
+    /// The session's "Notice" alert, attached where it can actually be seen.
+    func sessionAlert(when enabled: Bool) -> some View {
+        modifier(SessionAlert(enabled: enabled))
+    }
+}
+
+private struct SessionAlert: ViewModifier {
+    @Environment(NetSession.self) private var session
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        content.alert("Notice",
+                      isPresented: Binding(
+                          get: { enabled && session.errorMessage != nil },
+                          set: { if !$0 { session.errorMessage = nil } }
+                      )) {
+            Button("OK", role: .cancel) { session.errorMessage = nil }
+        } message: {
+            Text(session.errorMessage ?? "")
         }
     }
 }
@@ -162,6 +189,13 @@ private struct CheckInEditorView: View {
     @State private var hasAnnouncement = false
     /// Extra operators checking in from this same station.
     @State private var additional: [NetSession.AdditionalStation] = []
+    /// The call sign the form's details were last filled in for. When the
+    /// field no longer matches it, Save resolves the call sign itself rather
+    /// than storing whatever blanks the form holds.
+    @State private var lookedUpCall: String?
+    /// True while a save is running. Saving can wait on QRZ, and a second
+    /// click (or Break) in that time would log the same station twice.
+    @State private var isSaving = false
     @FocusState private var focus: Field?
 
     /// Which text field has keyboard focus.
@@ -171,7 +205,8 @@ private struct CheckInEditorView: View {
     }
 
     private var isEditing: Bool { target.existing != nil }
-    private var canSave: Bool { !callSign.trimmingCharacters(in: .whitespaces).isEmpty }
+    private var normalizedCall: String { callSign.trimmingCharacters(in: .whitespaces).uppercased() }
+    private var canSave: Bool { !normalizedCall.isEmpty && !isSaving }
 
     /// How many check-ins this window will create, for the Save button's label.
     private var pendingCount: Int { 1 + additional.filter { !$0.isBlank }.count }
@@ -287,6 +322,7 @@ private struct CheckInEditorView: View {
                     .keyboardShortcut(.cancelAction)
                 Button("Break") { saveThenBreak() }
                     .help("Save this entry (if any), log a net break, and close this window")
+                    .disabled(isSaving || session.isBusy)
                 Spacer()
                 if !isEditing {
                     Button("Save and Add New") { Task { await save(keepOpen: true) } }
@@ -371,6 +407,7 @@ private struct CheckInEditorView: View {
         persistentNotes = existing.persistentNotes
         temporaryNotes = existing.temporaryNotes
         hasAnnouncement = existing.hasAnnouncement
+        lookedUpCall = existing.callSign
         // Reflect whether this operator is already the NTS receiving station.
         isReceivingStation = !existing.callSign.isEmpty
             && existing.callSign.caseInsensitiveCompare(session.receivingStation) == .orderedSame
@@ -387,6 +424,7 @@ private struct CheckInEditorView: View {
         persistentNotes = ""
         temporaryNotes = ""
         status = nil
+        lookedUpCall = nil
         isReceivingStation = false
         hasAnnouncement = false
         // Focus first: a line's text field must not still be first responder
@@ -403,10 +441,12 @@ private struct CheckInEditorView: View {
         callSign = call
         Task {
             let resolved = await session.refreshFromQRZ(callSign: call)
+            guard normalizedCall == call else { return }   // retyped meanwhile
             status = resolved.source
             if case .notFound = resolved.source { return }
 
             let entry = resolved.entry
+            lookedUpCall = call
             name = entry.name
             city = entry.city
             county = entry.county
@@ -432,10 +472,14 @@ private struct CheckInEditorView: View {
         guard !call.isEmpty else { return }
         callSign = call
         let resolved = await session.resolveStation(callSign: call)
+        // The answer is for the call sign as it was; if it has been retyped
+        // since, filling the form would pin one operator's details on another.
+        guard normalizedCall == call else { return }
         status = resolved.source
         if case .notFound = resolved.source { return }
 
         let entry = resolved.entry
+        lookedUpCall = call
         name = entry.name
         city = entry.city
         county = entry.county
@@ -521,6 +565,9 @@ private struct CheckInEditorView: View {
     /// may each need a lookup.
     @discardableResult
     private func save(keepOpen: Bool) async -> Bool {
+        guard !isSaving else { return false }
+        isSaving = true
+        defer { isSaving = false }
         let saved = await session.saveCheckIns(
             id: target.existing?.id,
             callSign: callSign, name: name, nickname: nickname,
@@ -529,6 +576,7 @@ private struct CheckInEditorView: View {
             hasAnnouncement: hasAnnouncement,
             isReceivingStation: isReceivingStation,
             additional: additional,
+            primaryLookedUp: lookedUpCall == normalizedCall,
             keepEditorOpen: keepOpen)
         if saved && keepOpen { resetForm() }
         return saved
@@ -537,6 +585,7 @@ private struct CheckInEditorView: View {
     /// Save whatever has been entered (so nothing is lost), then log the break
     /// and close the window.
     private func saveThenBreak() {
+        guard !isSaving else { return }
         Task {
             if canSave {
                 // Keep the window open through the save so a failure doesn't
@@ -802,7 +851,7 @@ private struct OperatorBar: View {
                 Text("\(session.totalCheckins) check-ins")
                     .font(.system(size: size))
                     .foregroundStyle(.secondary)
-                Button("New Net") { session.resetNet() }
+                Button("New Net") { session.startNewNet() }
             } else {
                 TextField("Your call sign", text: $session.operatorCallSign)
                     .textFieldStyle(.roundedBorder)

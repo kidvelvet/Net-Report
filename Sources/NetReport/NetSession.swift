@@ -224,17 +224,22 @@ final class NetSession {
     private(set) var nextMessageNumber = 1
     var foundExistingData: Bool { operatorCount > 0 || reportCount > 0 }
 
+    /// Bumped on every write to either database, so the database manager
+    /// window — open beside a running net — reloads instead of going stale.
+    private(set) var databaseRevision = 0
+
     /// Re-read the cached operator count. Use after directory-only changes so we
     /// don't scan the report log for nothing.
     private func refreshOperatorCount() {
         operatorCount = userDatabase.count()
+        databaseRevision &+= 1
     }
 
     /// Every write to the operator directory goes through these two helpers, so
     /// the cached `operatorCount` can never be left stale by a new call site.
     private func storeDirectoryInfo(_ record: HamRecord) {
         try? userDatabase.saveDirectoryInfo(record)
-        refreshOperatorCount()
+        refreshOperatorCount()   // also bumps databaseRevision
     }
 
     /// `isNew: false` skips the recount: `save` upserts on the call sign, so if
@@ -242,13 +247,14 @@ final class NetSession {
     /// the count cannot have changed. That spares a COUNT(*) per check-in.
     private func storeOperator(_ entry: UserEntry, isNew: Bool = true) throws {
         try userDatabase.save(entry)
-        if isNew { refreshOperatorCount() }
+        if isNew { refreshOperatorCount() } else { databaseRevision &+= 1 }
     }
 
     /// Re-read the cached report figures after report-log changes.
     private func refreshReportCounts() {
         reportCount = database.reportCount()
         nextMessageNumber = database.nextMessageNumber()
+        databaseRevision &+= 1
     }
 
     /// Re-read every cached count. Use when both databases may have changed
@@ -524,38 +530,37 @@ final class NetSession {
             return
         }
         operatorCallSign = call
-        isBusy = true
-        defer { isBusy = false }
 
-        // Local directory first, then QRZ — same precedence as the check-in
-        // editor. A known operator starts the net with no network at all: no
-        // login, no lookup. `lookup` authenticates on its own when needed, so
-        // there is no separate `login()` round trip here either.
-        var record: HamRecord?
-        var nickname = ""
-        if let local = userDatabase.find(callSign: call) {
-            record = local.record
-            nickname = local.nickname
-        } else if let client {
-            record = (try? await client.lookup(callSign: call)) ?? nil
-            if let record {
-                storeDirectoryInfo(record)
-            } else {
-                errorMessage = "Couldn't look up \(call) on QRZ — starting the net "
-                    + "anyway; edit your entry to fill in the details."
-            }
-        } else {
-            // No QRZ account (the setup wizard allows skipping it): start the
-            // net anyway and let the operator type their own details.
-            errorMessage = "Not signed in to QRZ — starting the net with placeholder "
-                + "details. Edit your check-in to fill them in."
+        // Local directory first, then QRZ — the editor's own precedence, so a
+        // known operator starts the net with no network at all.
+        let resolved = await resolveStation(callSign: call)
+        let entry = resolved.entry
+        if case .notFound = resolved.source {
+            errorMessage = client == nil
+                ? "Not signed in to QRZ — starting the net with placeholder details. "
+                    + "Edit your check-in to fill them in."
+                : "Couldn't look up \(call) on QRZ — starting the net anyway; "
+                    + "edit your entry to fill in the details."
         }
+        let record = entry.hasStationDetails ? entry.record : nil
         operatorRecord = record
-        let seed: CheckIn = record.map { CheckIn(record: $0, nickname: nickname) }
-            ?? CheckIn(callSign: call, name: "Unknown", city: "Unknown", county: "Unknown")
+        // The directory's nickname and persistent notes come along either way:
+        // they are what net control reads out about each station.
+        let seed: CheckIn = record.map {
+            CheckIn(record: $0, nickname: entry.nickname, persistentNotes: entry.persistentNotes)
+        } ?? CheckIn(callSign: call, name: "Unknown", nickname: entry.nickname,
+                     city: "Unknown", county: "Unknown", persistentNotes: entry.persistentNotes)
         checkIns = [seed]
         netStarted = true
         append(log: "Net started. Operator \(call) checked in.")
+    }
+
+    /// The operator's record for the NTS form. Read from the directory at
+    /// report time, so correcting your own entry mid-net (or on a later net)
+    /// reaches the form instead of the details captured at Start Net.
+    private var currentOperatorRecord: HamRecord? {
+        userDatabase.find(callSign: operatorCallSign)
+            .flatMap { $0.hasStationDetails ? $0.record : nil } ?? operatorRecord
     }
 
     // MARK: - Check-in entry
@@ -577,66 +582,60 @@ final class NetSession {
     /// cached, but the operator's **nickname and persistent notes are preserved**.
     func refreshFromQRZ(callSign: String) async -> ResolvedStation {
         let call = callSign.trimmingCharacters(in: .whitespaces).uppercased()
-        guard !call.isEmpty else {
-            return ResolvedStation(entry: UserEntry(callSign: "", name: ""),
-                                   source: .notFound("Enter a call sign."))
-        }
-        guard let client else {
-            needsCredentials = true
-            return ResolvedStation(entry: UserEntry(callSign: call, name: ""),
-                                   source: .notFound("Sign in to QRZ.com to refresh."))
-        }
-
-        isBusy = true
-        defer { isBusy = false }
-        do {
-            guard let record = try await client.lookup(callSign: call) else {
-                return ResolvedStation(entry: UserEntry(callSign: call, name: ""),
-                                       source: .notFound("No QRZ record found for \(call)."))
-            }
-            // saveDirectoryInfo updates address fields only — nickname and
-            // persistent notes already in the directory are left untouched.
-            storeDirectoryInfo(record)
-            let merged = userDatabase.find(callSign: call) ?? UserEntry(record: record)
-            append(log: "Refreshed \(call) from QRZ.")
-            return ResolvedStation(entry: merged, source: .qrz)
-        } catch {
-            return ResolvedStation(entry: UserEntry(callSign: call, name: ""),
-                                   source: .notFound("Lookup failed: \(error.localizedDescription)"))
-        }
+        guard !call.isEmpty else { return Self.enterCallSign }
+        // No sign-in sheet from here: this runs from inside the entry window,
+        // and a second sheet would replace it and lose what was typed.
+        let resolved = await lookUpOnQRZ(call, notSignedIn: "Sign in to QRZ.com (File menu) to refresh.")
+        if resolved.source == .qrz { append(log: "Refreshed \(call) from QRZ.") }
+        return resolved
     }
 
     /// Resolve a call sign for the editor: **the local operator directory first**,
     /// falling back to QRZ only when the station isn't already known. A fresh QRZ
     /// result is cached locally (without disturbing any saved nickname/notes).
+    ///
+    /// A directory row with no name or location — one holding only a nickname,
+    /// say — doesn't count as known: QRZ is still asked, so a row like that
+    /// can't permanently hide an operator's details.
     func resolveStation(callSign: String) async -> ResolvedStation {
         let call = callSign.trimmingCharacters(in: .whitespaces).uppercased()
-        guard !call.isEmpty else { return ResolvedStation(entry: UserEntry(callSign: "", name: ""),
-                                                          source: .notFound("Enter a call sign.")) }
+        guard !call.isEmpty else { return Self.enterCallSign }
 
         // 1. Local directory — no network needed.
-        if let local = userDatabase.find(callSign: call) {
+        let local = userDatabase.find(callSign: call)
+        if let local, local.hasStationDetails {
             return ResolvedStation(entry: local, source: .localDirectory)
         }
 
         // 2. QRZ.
-        guard let client else {
-            return ResolvedStation(entry: UserEntry(callSign: call, name: ""),
-                                   source: .notFound("Not in the local directory, and you are not signed in to QRZ."))
+        return await lookUpOnQRZ(call, notSignedIn: "Not in the local directory, and you are not signed in to QRZ.")
+    }
+
+    private static let enterCallSign = ResolvedStation(entry: UserEntry(callSign: "", name: ""),
+                                                       source: .notFound("Enter a call sign."))
+
+    /// Ask QRZ about `call` and cache the answer. Whatever the outcome, the
+    /// returned entry carries any nickname and notes already in the directory.
+    private func lookUpOnQRZ(_ call: String, notSignedIn: String) async -> ResolvedStation {
+        let local = userDatabase.find(callSign: call)
+        func miss(_ message: String) -> ResolvedStation {
+            ResolvedStation(entry: local ?? UserEntry(callSign: call, name: ""), source: .notFound(message))
         }
+        guard let client else { return miss(notSignedIn) }
 
         isBusy = true
         defer { isBusy = false }
         do {
             guard let record = try await client.lookup(callSign: call) else {
-                return ResolvedStation(entry: UserEntry(callSign: call, name: ""),
-                                       source: .notFound("No QRZ record found for \(call)."))
+                return miss("No QRZ record found for \(call).")
             }
+            // saveDirectoryInfo updates address fields only — nickname and
+            // persistent notes already in the directory are left untouched.
             storeDirectoryInfo(record)
-            return ResolvedStation(entry: UserEntry(record: record), source: .qrz)
+            return ResolvedStation(entry: userDatabase.find(callSign: call) ?? UserEntry(record: record),
+                                   source: .qrz)
         } catch {
-            return ResolvedStation(entry: UserEntry(callSign: call, name: ""),
-                                   source: .notFound("Lookup failed: \(error.localizedDescription)"))
+            return miss("Lookup failed: \(error.localizedDescription)")
         }
     }
 
@@ -711,8 +710,17 @@ final class NetSession {
         hasAnnouncement: Bool = false,
         isReceivingStation: Bool = false,
         additional: [AdditionalStation] = [],
+        primaryLookedUp: Bool = true,
         keepEditorOpen: Bool = false
     ) async -> Bool {
+        // Saved without Look Up: resolve it now, exactly as the extra lines
+        // are, and keep whatever is known for every field left blank — rather
+        // than writing those blanks over the directory entry.
+        var known: UserEntry?
+        if !primaryLookedUp {
+            known = await resolveStation(callSign: callSign).entry
+        }
+
         // Keep the editor open through the primary save so a rejection doesn't
         // close the window and lose what was typed.
         guard saveCheckIn(
@@ -720,6 +728,7 @@ final class NetSession {
             city: city, county: county, state: state,
             persistentNotes: persistentNotes, temporaryNotes: temporaryNotes,
             hasAnnouncement: hasAnnouncement, isReceivingStation: isReceivingStation,
+            fillingBlanksFrom: known,
             keepEditorOpen: true
         ) else { return false }
 
@@ -753,7 +762,8 @@ final class NetSession {
         sharingLocation fallback: (city: String, county: String, state: String)
     ) async {
         let known = userDatabase.find(callSign: call)
-        var record = lookup?.entry?.record ?? known?.record
+        var record = lookup?.entry?.record
+            ?? known.flatMap { $0.hasStationDetails ? $0.record : nil }
 
         // A line already looked up in the editor is trusted as-is — the
         // operator has seen the result — so one call sign costs one lookup,
@@ -769,8 +779,7 @@ final class NetSession {
         let effectiveNickname = nickname.isEmpty ? (known?.nickname ?? "") : nickname
         if !nickname.isEmpty {
             var entry = userDatabase.find(callSign: call)
-                ?? UserEntry(record: record ?? HamRecord(callSign: call, name: "Unknown",
-                                                         street: "", city: "", county: "", state: ""))
+                ?? record.map { UserEntry(record: $0) } ?? UserEntry(callSign: call, name: "")
             entry.nickname = nickname
             try? storeOperator(entry, isNew: known == nil)
         }
@@ -807,6 +816,7 @@ final class NetSession {
         temporaryNotes: String,
         hasAnnouncement: Bool = false,
         isReceivingStation: Bool = false,
+        fillingBlanksFrom fill: UserEntry? = nil,
         keepEditorOpen: Bool = false
     ) -> Bool {
         let call = callSign.trimmingCharacters(in: .whitespaces).uppercased()
@@ -829,12 +839,18 @@ final class NetSession {
             county: county.trimmingCharacters(in: .whitespaces),
             state: state.trimmingCharacters(in: .whitespaces),
             persistentNotes: persistentNotes.trimmingCharacters(in: .whitespacesAndNewlines)
-        )
+        ).fillingBlanks(from: fill?.callSign == call ? fill : nil)
         // Only persistent notes are stored; temporary notes stay in this net.
-        do {
-            try storeOperator(entry, isNew: known == nil)
-        } catch {
-            errorMessage = "Could not save to the operator directory: \(error.localizedDescription)"
+        // A call sign nobody knows anything about isn't written at all: an
+        // empty row would later pass for a directory hit and block QRZ.
+        let worthStoring = known != nil || entry.hasStationDetails
+            || !entry.nickname.isEmpty || !entry.persistentNotes.isEmpty
+        if worthStoring {
+            do {
+                try storeOperator(entry, isNew: known == nil)
+            } catch {
+                errorMessage = "Could not save to the operator directory: \(error.localizedDescription)"
+            }
         }
 
         // Editing a row must not silently un-tick an announcement already read.
@@ -865,6 +881,13 @@ final class NetSession {
             receivingStation = entry.callSign
             receivingNickname = entry.nickname
             append(log: "NTS receiving station set to \(entry.callSign).")
+        } else if id != nil,
+                  receivingStation.caseInsensitiveCompare(entry.callSign) == .orderedSame {
+            // The editor shows the box ticked for the receiving station's own
+            // row, so unticking it there must actually un-set it.
+            receivingStation = ""
+            receivingNickname = ""
+            append(log: "\(entry.callSign) is no longer the NTS receiving station.")
         }
 
         if !keepEditorOpen { editorTarget = nil }
@@ -940,6 +963,7 @@ final class NetSession {
     func deleteReport(id: Int64) {
         do {
             try database.deleteReport(id: id)
+            refreshReportCounts()   // the count and next message number changed
             append(log: "Deleted a report row from the report log.")
         } catch {
             errorMessage = "Delete failed: \(error.localizedDescription)"
@@ -967,22 +991,26 @@ final class NetSession {
     }
 
     /// Back up either database to a file the user picks.
-    func backupDatabase(_ kind: DatabaseKind) {
+    /// Returns true only when a backup was actually written.
+    @discardableResult
+    func backupDatabase(_ kind: DatabaseKind) -> Bool {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [UTType(filenameExtension: "sqlite") ?? .data]
         panel.allowsOtherFileTypes = true
         let tag = kind == .reports ? "reports" : "users"
         panel.nameFieldStringValue = "netreport-\(tag)-\(NetReportBuilder.timestampToken()).sqlite"
         panel.message = "Save a backup copy of the \(kind.rawValue.lowercased())."
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
         do {
             switch kind {
             case .reports:   try database.backup(to: url)
             case .operators: try userDatabase.backup(to: url)
             }
             append(log: "\(kind.rawValue) backed up to \(url.path).")
+            return true
         } catch {
             errorMessage = "Backup failed: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -1004,7 +1032,12 @@ final class NetSession {
 
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            backupDatabase(kind)
+            // "Back up, then erase" means exactly that: a cancelled save panel
+            // or a failed copy leaves the database alone.
+            guard backupDatabase(kind) else {
+                append(log: "Erase cancelled — no backup was made.")
+                return
+            }
             erase(kind)
         case .alertSecondButtonReturn:
             erase(kind)
@@ -1033,6 +1066,15 @@ final class NetSession {
     // MARK: - Report
 
     func generateReport() async {
+        guard !isGeneratingReport else { return }
+        if let last = lastResult, currentFingerprint == reportedFingerprint {
+            errorMessage = "Nothing has changed since message #\(last.messageNumber) was saved, "
+                + "so no new report was made."
+            return
+        }
+        isGeneratingReport = true
+        defer { isGeneratingReport = false }
+
         let receiver = receivingStation.trimmingCharacters(in: .whitespaces).uppercased()
         guard !receiver.isEmpty else {
             errorMessage = "Enter the station receiving the NTS form."
@@ -1052,22 +1094,24 @@ final class NetSession {
         // QRZ round trip (which can stall 20s on a bad connection). Only use the
         // local copy when it has a surname, since that's what the nickname
         // substitution on the radiogram needs.
-        var receivingRecord: HamRecord?
-        if let local = userDatabase.find(callSign: receiver), !local.lastName.isEmpty {
-            receivingRecord = local.record
-        } else if let client {
-            receivingRecord = (try? await client.lookup(callSign: receiver)) ?? nil
-            if let receivingRecord {
-                storeDirectoryInfo(receivingRecord)
-            }
+        // A full local record (with a last name for the form's address line)
+        // needs no network. Otherwise ask QRZ, and if it has nothing either,
+        // use whatever the directory does hold rather than printing nothing.
+        let local = userDatabase.find(callSign: receiver)
+        var receivingRecord = local.flatMap { $0.lastName.isEmpty ? nil : $0.record }
+        if receivingRecord == nil, let client,
+           let fetched = (try? await client.lookup(callSign: receiver)) ?? nil {
+            storeDirectoryInfo(fetched)
+            receivingRecord = fetched
         }
+        receivingRecord = receivingRecord ?? local.flatMap { $0.hasStationDetails ? $0.record : nil }
         // A missing record is non-fatal: the form still prints, using the call
         // sign (and nickname, if given) alone.
 
         do {
             let result = try NetReportBuilder.generate(
                 userCallSign: operatorCallSign,
-                userRecord: operatorRecord,
+                userRecord: currentOperatorRecord,
                 receivingStation: receiver,
                 receivingRecord: receivingRecord,
                 receivingNickname: receivingNickname,
@@ -1079,6 +1123,7 @@ final class NetSession {
                 database: database
             )
             lastResult = result
+            reportedFingerprint = currentFingerprint
             append(log: "Check-in list saved to \(result.checkinListURL.path)")
             append(log: "Net report saved to \(result.netReportURL.path)")
             append(log: "Message #\(result.messageNumber) logged · \(result.totalCheckins) check-ins.")
@@ -1098,14 +1143,43 @@ final class NetSession {
         NSWorkspace.shared.open(url)
     }
 
-    /// True when quitting now would lose work: there are check-ins logged and
-    /// no report has been generated for them yet.
-    var hasUnsavedNet: Bool {
-        netStarted && !checkIns.isEmpty && lastResult == nil
+    /// Everything that ends up in a report. Two reports with equal fingerprints
+    /// are the same report.
+    struct ReportFingerprint: Equatable {
+        var rows: [[String]]
+        var receivingStation: String
+        var receivingNickname: String
+        var trafficMessages: Int
     }
 
-    /// Write both PDFs for an in-progress net, for the "quit without closing the
-    /// net" case.
+    /// What a report generated right now would contain.
+    var currentFingerprint: ReportFingerprint {
+        ReportFingerprint(
+            rows: checkIns.map(\.tableRow),
+            receivingStation: receivingStation.trimmingCharacters(in: .whitespaces).uppercased(),
+            receivingNickname: receivingNickname.trimmingCharacters(in: .whitespaces),
+            trafficMessages: max(0, trafficMessages))
+    }
+
+    /// What the last report this net generated contained.
+    private var reportedFingerprint: ReportFingerprint?
+
+    /// Guards against a second report starting while one is in flight — two
+    /// clicks on Generate would otherwise log two messages.
+    private var isGeneratingReport = false
+
+    /// True when quitting now would lose work: check-ins are logged and the
+    /// last report (if any) no longer matches them.
+    ///
+    /// Compared by content rather than "has a report been made": check-ins
+    /// added after Generate Report used to be silently discarded on quit,
+    /// because one report had already been made.
+    var hasUnsavedNet: Bool {
+        netStarted && !checkIns.isEmpty && currentFingerprint != reportedFingerprint
+    }
+
+    /// Write both PDFs for an in-progress net before it is thrown away — on
+    /// quit, or when New Net replaces it.
     ///
     /// Synchronous on purpose: this runs inside `applicationShouldTerminate`,
     /// where there is nowhere to await. That means no QRZ round trip — the
@@ -1113,15 +1187,17 @@ final class NetSession {
     /// missing receiving station is tolerated rather than refused, because
     /// rescuing the check-in list matters more than a complete NTS form.
     @discardableResult
-    func saveReportsBeforeQuitting() -> Bool {
-        guard !checkIns.isEmpty else { return true }
+    func saveUnsavedReports() -> Bool {
+        // Re-checked here, not just when the dialog opened: a Generate Report
+        // already in flight can finish while the quit dialog is up.
+        guard hasUnsavedNet else { return true }
         let receiver = receivingStation.trimmingCharacters(in: .whitespaces).uppercased()
         let receivingRecord = userDatabase.find(callSign: receiver)?.record
 
         do {
             let result = try NetReportBuilder.generate(
                 userCallSign: operatorCallSign,
-                userRecord: operatorRecord,
+                userRecord: currentOperatorRecord,
                 receivingStation: receiver,
                 receivingRecord: receivingRecord,
                 receivingNickname: receivingNickname,
@@ -1133,9 +1209,10 @@ final class NetSession {
                 database: database
             )
             lastResult = result
+            reportedFingerprint = currentFingerprint
             refreshSetupState()
-            append(log: "Saved on quit — check-in list: \(result.checkinListURL.path)")
-            append(log: "Saved on quit — net report: \(result.netReportURL.path)")
+            append(log: "Saved — check-in list: \(result.checkinListURL.path)")
+            append(log: "Saved — net report: \(result.netReportURL.path)")
             return true
         } catch {
             errorMessage = "Could not save the reports: \(error.localizedDescription)"
@@ -1148,7 +1225,41 @@ final class NetSession {
         NSWorkspace.shared.activateFileViewerSelecting([outputDirectory])
     }
 
-    func resetNet() {
+    /// How the unsaved work is described in the quit and New Net prompts.
+    var unsavedNetSummary: String {
+        let n = totalCheckins
+        let count = "\(n) check-in\(n == 1 ? "" : "s")"
+        return lastResult == nil
+            ? "A net is in progress with \(count) and no report generated yet."
+            : "The net has changed since message #\(lastResult!.messageNumber) was saved "
+              + "(\(count) now)."
+    }
+
+    /// File ▸ New Net. Clearing a net is as final as quitting, so it asks the
+    /// same question first instead of silently discarding the check-ins.
+    func startNewNet() {
+        if hasUnsavedNet {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Start a new net?"
+            alert.informativeText = unsavedNetSummary + " Saving writes both the check-in "
+                + "list and the net report first; otherwise the check-in list is discarded."
+            alert.addButton(withTitle: "Save Reports & Start New")
+            alert.addButton(withTitle: "Discard & Start New")
+            alert.addButton(withTitle: "Cancel")
+            switch alert.runModal() {
+            case .alertFirstButtonReturn:
+                guard saveUnsavedReports() else { return }
+            case .alertSecondButtonReturn:
+                break
+            default:
+                return
+            }
+        }
+        resetNet()
+    }
+
+    private func resetNet() {
         operatorCallSign = ""
         operatorRecord = nil
         netStarted = false
@@ -1158,6 +1269,7 @@ final class NetSession {
         receivingNickname = ""
         trafficMessages = 1
         lastResult = nil
+        reportedFingerprint = nil
         log = []
     }
 

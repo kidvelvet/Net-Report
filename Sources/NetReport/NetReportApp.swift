@@ -33,10 +33,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // A net with check-ins and no report yet is the only case where
         // quitting loses work, so that is the only case that offers to save.
         if let session = Self.session, session.hasUnsavedNet {
-            let n = session.totalCheckins
             alert.alertStyle = .warning
-            alert.informativeText = "A net is in progress with \(n) check-in"
-                + "\(n == 1 ? "" : "s") and no report generated yet. Saving writes both the "
+            alert.informativeText = session.unsavedNetSummary + " Saving writes both the "
                 + "check-in list and the net report before quitting; the check-in list is "
                 + "otherwise discarded."
             alert.addButton(withTitle: "Save Reports & Quit")
@@ -47,7 +45,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             case .alertFirstButtonReturn:
                 // Don't quit on a failed save, or the work is lost anyway —
                 // the session surfaces why.
-                return session.saveReportsBeforeQuitting() ? .terminateNow : .terminateCancel
+                return session.saveUnsavedReports() ? .terminateNow : .terminateCancel
             case .alertSecondButtonReturn:
                 return .terminateNow
             default:
@@ -79,7 +77,10 @@ struct NetReportApp: App {
     @State private var fonts = FontSettings()
 
     var body: some Scene {
-        WindowGroup("Net Report") {
+        // A single window, not a WindowGroup: every window would share the one
+        // session, so a second window would mirror the first — editor sheet
+        // and all — and two editors on one entry could each save it.
+        Window("Net Report", id: WindowID.main) {
             ContentView()
                 .environment(session)
                 .environment(fonts)
@@ -91,7 +92,7 @@ struct NetReportApp: App {
         }
         .commands {
             CommandGroup(after: .newItem) {
-                Button("New Net") { session.resetNet() }
+                Button("New Net") { session.startNewNet() }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
                 Button("Reveal Reports Folder") { session.revealOutputFolder() }
                     .keyboardShortcut("r", modifiers: [.command, .shift])
@@ -160,6 +161,7 @@ struct NetReportApp: App {
 }
 
 enum WindowID {
+    static let main = "main"
     static let announcements = "announcements"
     static let databases = "databases"
 }

@@ -19,6 +19,7 @@
 import Testing
 import Foundation
 import CoreText
+import CoreGraphics
 @testable import NetReportKit
 
 private func tempDir() -> URL {
@@ -310,6 +311,39 @@ struct DatabaseTests {
         #expect(db.maxMessageNumber() != nil)
     }
 
+    /// A second connection (another Mac on a shared folder) must wait for a
+    /// write in progress rather than failing straight away.
+    @Test func secondConnectionWaitsForALockInsteadOfFailing() throws {
+        let path = tempDir().appendingPathComponent("shared.sqlite").path
+        let first = try NetDatabase(path: path)
+        let second = try NetDatabase(path: path)
+        try first.exec("BEGIN EXCLUSIVE;")
+        let released = DispatchSemaphore(value: 0)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.3) {
+            try? first.exec("COMMIT;")
+            released.signal()
+        }
+        // Without a busy timeout this throws "database is locked" immediately.
+        try second.setStartingNumber(10)
+        released.wait()
+        #expect(second.nextMessageNumber() == 10)
+    }
+
+    @Test func reimportingTheSameLogAddsNothing() throws {
+        let db = try newDB()
+        let csv = """
+        message_number,timestamp,user_call_sign,receiving_station,checkins,traffic_messages,pdf_file
+        1,2025-07-02 20:00:00,W7SKW,W1AW,28,2,none
+        2,2025-07-09 20:00:00,W7SKW,W1AW,30,1,none
+        """
+        let url = tempDir().appendingPathComponent("again.csv")
+        try csv.write(to: url, atomically: true, encoding: .utf8)
+
+        #expect(try db.importCSV(from: url) == 2)
+        #expect(try db.importCSV(from: url) == 0)
+        #expect(db.reportCount() == 2)
+    }
+
     /// The original log had a row with a malformed timestamp (`20,00:00`), which
     /// shifts that row's columns. Import must skip or absorb it, not throw.
     @Test func toleratesMalformedRows() throws {
@@ -339,6 +373,54 @@ struct UserDatabaseTests {
     private let theodore = HamRecord(callSign: "W1AW", name: "Theodore Marks",
                                    firstName: "Theodore", lastName: "Marks",
                                    street: "5 Rd", city: "Salem", county: "Marion", state: "OR")
+
+    /// Re-importing a roster that lacks nickname/notes columns (or has blank
+    /// cells) must not wipe what was entered locally.
+    @Test func csvImportKeepsFieldsTheFileLeavesBlank() throws {
+        let db = try newDB()
+        try db.save(UserEntry(record: theodore, nickname: "Ted", persistentNotes: "Net liaison"))
+
+        let csv = """
+        call_sign,name,city,county
+        W1AW,Theodore Marks,Keizer,
+        K7NEW,New Person,Bend,Deschutes
+        """
+        let url = tempDir().appendingPathComponent("roster.csv")
+        try csv.write(to: url, atomically: true, encoding: .utf8)
+        #expect(try db.importCSV(from: url) == 2)
+
+        let ted = try #require(db.find(callSign: "W1AW"))
+        #expect(ted.city == "Keizer")              // a value in the file wins
+        #expect(ted.county == "Marion")            // a blank cell keeps the old one
+        #expect(ted.state == "OR")                 // so does a missing column
+        #expect(ted.nickname == "Ted")
+        #expect(ted.persistentNotes == "Net liaison")
+        #expect(db.find(callSign: "K7NEW")?.county == "Deschutes")
+    }
+
+    @Test func entryWithOnlyANicknameHasNoStationDetails() {
+        #expect(!UserEntry(callSign: "K7A", name: "", nickname: "Al").hasStationDetails)
+        #expect(!UserEntry(callSign: "K7A", name: "Unknown", city: " ").hasStationDetails)
+        #expect(UserEntry(callSign: "K7A", name: "", city: "Bend").hasStationDetails)
+        #expect(UserEntry(record: theodore).hasStationDetails)
+    }
+
+    /// A form saved without Look Up keeps what the directory knows for every
+    /// field left blank, and keeps every field the operator did type.
+    @Test func fillingBlanksKeepsTypedValuesAndKnownOnes() {
+        let known = UserEntry(record: theodore, nickname: "Ted", persistentNotes: "Net liaison")
+        let typed = UserEntry(callSign: "W1AW", name: "", nickname: "Teddy", city: "Keizer")
+        let merged = typed.fillingBlanks(from: known)
+        #expect(merged.name == "Theodore Marks")
+        #expect(merged.firstName == "Theodore")
+        #expect(merged.lastName == "Marks")
+        #expect(merged.nickname == "Teddy")
+        #expect(merged.city == "Keizer")
+        #expect(merged.county == "Marion")
+        #expect(merged.street == "5 Rd")
+        #expect(merged.persistentNotes == "Net liaison")
+        #expect(typed.fillingBlanks(from: nil) == typed)
+    }
 
     @Test func startsEmptyAndFindsNothing() throws {
         let db = try newDB()
@@ -1020,6 +1102,47 @@ struct WrapTests {
         #expect(RadiogramPDF.wrap("Net control", font: font, maxWidth: 300) == ["Net control"])
         #expect(RadiogramPDF.wrap("", font: font, maxWidth: 300) == [""])
         #expect(RadiogramPDF.wrap("   ", font: font, maxWidth: 300) == [""])
+    }
+}
+
+@Suite("Unknown stations")
+struct UnknownStationTests {
+    @Test func logLineNamesAnUnknownStation() {
+        let c = CheckIn(callSign: "ZZ2TST", name: "", city: "", county: "")
+        #expect(c.logLine == "ZZ2TST — Unknown")
+    }
+}
+
+@Suite("Check-in list pagination")
+struct PaginationTests {
+    private let header = ["Call Sign", "Name", "Nickname", "City", "County", "Notes"]
+
+    private func pages(_ rows: Int, note: String = "") throws -> Int {
+        let url = tempDir().appendingPathComponent("list.pdf")
+        let body = (1...max(1, rows)).prefix(rows).map { i in
+            ["K7A\(i)", "Operator \(i)", "", "Portland", "Multnomah", note]
+        }
+        try RadiogramPDF.writeCheckinList(to: url, tableRows: [header] + body)
+        let doc = try #require(CGPDFDocument(url as CFURL))
+        return doc.numberOfPages
+    }
+
+    @Test func shortListFitsOnOnePage() throws {
+        #expect(try pages(0) == 1)
+        #expect(try pages(10) == 1)
+    }
+
+    /// Nets have had nearly forty check-ins; rows past the bottom of the first
+    /// page used to be drawn off the page and silently lost.
+    @Test func longListContinuesOntoMorePages() throws {
+        #expect(try pages(40) == 2)
+        #expect(try pages(120) >= 4)
+    }
+
+    /// A pathological note can't push a row taller than a page.
+    @Test func hugeNoteIsCappedRatherThanOverflowing() throws {
+        let huge = String(repeating: "word ", count: 400)
+        #expect(try pages(3, note: huge) <= 3)
     }
 }
 

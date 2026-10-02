@@ -65,6 +65,36 @@ public struct UserEntry: Sendable, Equatable, Identifiable {
         self.updatedAt = updatedAt
     }
 
+    /// True when the entry says anything about the station itself — a name or
+    /// a location. An entry holding only a nickname or notes (or nothing) is
+    /// not a usable lookup result: QRZ should still be asked about it.
+    public var hasStationDetails: Bool {
+        [name, city, county, state].contains { $0.meaningful != nil }
+    }
+
+    /// This entry with every blank field filled from `known`. Used when a form
+    /// is saved without being looked up first, so fields the operator never
+    /// saw are kept rather than overwritten with blanks.
+    public func fillingBlanks(from known: UserEntry?) -> UserEntry {
+        guard let known else { return self }
+        func pick(_ mine: String, _ theirs: String) -> String {
+            mine.meaningful == nil && theirs.meaningful != nil ? theirs : mine
+        }
+        var merged = self
+        merged.name = pick(name, known.name)
+        merged.nickname = pick(nickname, known.nickname)
+        merged.street = pick(street, known.street)
+        merged.city = pick(city, known.city)
+        merged.county = pick(county, known.county)
+        merged.state = pick(state, known.state)
+        merged.persistentNotes = pick(persistentNotes, known.persistentNotes)
+        if merged.name == known.name {
+            merged.firstName = known.firstName
+            merged.lastName = known.lastName
+        }
+        return merged
+    }
+
     /// The directory entry as a station record, for the report/NTS code paths.
     public var record: HamRecord {
         HamRecord(
@@ -198,6 +228,27 @@ public final class UserDatabase: SQLiteStore {
           notes = excluded.notes, updated_at = excluded.updated_at;
         """
 
+    /// Bulk-import upsert: a blank CSV cell (or a missing column) keeps what the
+    /// directory already holds, so re-importing a roster that has no nickname
+    /// or notes columns doesn't wipe the ones entered locally.
+    private static let mergeSQL = """
+        INSERT INTO users
+          (call_sign, name, first_name, last_name, nickname,
+           street, city, county, state, notes, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(call_sign) DO UPDATE SET
+          name = COALESCE(NULLIF(excluded.name, ''), name),
+          first_name = COALESCE(NULLIF(excluded.first_name, ''), first_name),
+          last_name = COALESCE(NULLIF(excluded.last_name, ''), last_name),
+          nickname = COALESCE(NULLIF(excluded.nickname, ''), nickname),
+          street = COALESCE(NULLIF(excluded.street, ''), street),
+          city = COALESCE(NULLIF(excluded.city, ''), city),
+          county = COALESCE(NULLIF(excluded.county, ''), county),
+          state = COALESCE(NULLIF(excluded.state, ''), state),
+          notes = COALESCE(NULLIF(excluded.notes, ''), notes),
+          updated_at = excluded.updated_at;
+        """
+
     /// Insert or fully update an operator, including nickname and notes. Used
     /// when the operator saves the check-in form, so clearing a field sticks.
     public func save(_ entry: UserEntry, at date: Date = Date()) throws {
@@ -304,7 +355,7 @@ public final class UserDatabase: SQLiteStore {
             return fields[index].trimmingCharacters(in: .whitespaces)
         }
 
-        let stmt = try prepare(Self.upsertSQL)
+        let stmt = try prepare(Self.mergeSQL)
         defer { sqlite3_finalize(stmt) }
         let stamp = SQLiteStore.timestampString(date)   // identical for every row
 

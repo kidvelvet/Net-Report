@@ -208,7 +208,8 @@ public final class NetDatabase: SQLiteStore {
 
     /// Import rows from a CSV in the original `message_index.csv` format. Returns
     /// the number of rows imported. Rows without a numeric message number are
-    /// skipped. Marks first-run setup complete.
+    /// skipped, as are message numbers already in the log — so importing the
+    /// same file twice doesn't double every report. Marks first-run setup complete.
     @discardableResult
     public func importCSV(from url: URL) throws -> Int {
         let contents = try String(contentsOf: url, encoding: .utf8)
@@ -220,7 +221,8 @@ public final class NetDatabase: SQLiteStore {
             INSERT INTO net_reports
               (message_number, timestamp, user_call_sign, receiving_station,
                checkins, traffic_messages, pdf_file)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
+            SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+            WHERE NOT EXISTS (SELECT 1 FROM net_reports WHERE message_number = ?1);
             """)
         defer { sqlite3_finalize(stmt) }
 
@@ -246,7 +248,7 @@ public final class NetDatabase: SQLiteStore {
                 sqlite3_bind_int64(stmt, 6, Int64(Int(fields[5].trimmingCharacters(in: .whitespaces)) ?? 0))
                 bindText(stmt, 7, fields[6])
                 guard sqlite3_step(stmt) == SQLITE_DONE else { throw lastError() }
-                imported += 1
+                imported += Int(sqlite3_changes(db))
             }
             try exec("COMMIT;")
         } catch {
