@@ -94,16 +94,10 @@ public enum RadiogramPDF {
         ctx.setStrokeColor(black)
     }
 
-    /// Built once — configured formatters are reusable and costly to create.
-    private static let stampFormatter: DateFormatter = {
-        let stamp = DateFormatter()
-        stamp.locale = Locale(identifier: "en_US_POSIX")
-        stamp.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return stamp
-    }()
-
+    /// Same `yyyy-MM-dd HH:mm:ss` form the databases store, from the one
+    /// shared formatter.
     private static func generationStamp(_ date: Date) -> String {
-        stampFormatter.string(from: date)
+        SQLiteStore.timestampString(date)
     }
 
     // MARK: - Table

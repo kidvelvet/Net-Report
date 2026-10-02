@@ -585,7 +585,8 @@ final class NetSession {
         guard !call.isEmpty else { return Self.enterCallSign }
         // No sign-in sheet from here: this runs from inside the entry window,
         // and a second sheet would replace it and lose what was typed.
-        let resolved = await lookUpOnQRZ(call, notSignedIn: "Sign in to QRZ.com (File menu) to refresh.")
+        let resolved = await lookUpOnQRZ(call, local: userDatabase.find(callSign: call),
+                                         notSignedIn: "Sign in to QRZ.com (File menu) to refresh.")
         if resolved.source == .qrz { append(log: "Refreshed \(call) from QRZ.") }
         return resolved
     }
@@ -608,16 +609,17 @@ final class NetSession {
         }
 
         // 2. QRZ.
-        return await lookUpOnQRZ(call, notSignedIn: "Not in the local directory, and you are not signed in to QRZ.")
+        return await lookUpOnQRZ(call, local: local,
+                                 notSignedIn: "Not in the local directory, and you are not signed in to QRZ.")
     }
 
     private static let enterCallSign = ResolvedStation(entry: UserEntry(callSign: "", name: ""),
                                                        source: .notFound("Enter a call sign."))
 
     /// Ask QRZ about `call` and cache the answer. Whatever the outcome, the
-    /// returned entry carries any nickname and notes already in the directory.
-    private func lookUpOnQRZ(_ call: String, notSignedIn: String) async -> ResolvedStation {
-        let local = userDatabase.find(callSign: call)
+    /// returned entry carries any nickname and notes already in the directory
+    /// (`local`, which the caller has already read).
+    private func lookUpOnQRZ(_ call: String, local: UserEntry?, notSignedIn: String) async -> ResolvedStation {
         func miss(_ message: String) -> ResolvedStation {
             ResolvedStation(entry: local ?? UserEntry(callSign: call, name: ""), source: .notFound(message))
         }
@@ -761,35 +763,30 @@ final class NetSession {
         lookup: AdditionalStation.Lookup?,
         sharingLocation fallback: (city: String, county: String, state: String)
     ) async {
-        let known = userDatabase.find(callSign: call)
-        var record = lookup?.entry?.record
-            ?? known.flatMap { $0.hasStationDetails ? $0.record : nil }
-
         // A line already looked up in the editor is trusted as-is — the
         // operator has seen the result — so one call sign costs one lookup,
-        // not one in the editor and another on save.
-        if lookup == nil, record == nil, let client {
-            isBusy = true
-            record = (try? await client.lookup(callSign: call)) ?? nil
-            isBusy = false
-            if let record { storeDirectoryInfo(record) }
+        // not one in the editor and another on save. Anything else resolves
+        // exactly as the editor would: directory first, QRZ on a miss.
+        var entry: UserEntry
+        if let lookup {
+            entry = lookup.entry ?? userDatabase.find(callSign: call) ?? UserEntry(callSign: call, name: "")
+        } else {
+            entry = await resolveStation(callSign: call).entry
         }
 
-        // Persist a nickname typed here without clobbering notes already stored.
-        let effectiveNickname = nickname.isEmpty ? (known?.nickname ?? "") : nickname
-        if !nickname.isEmpty {
-            var entry = userDatabase.find(callSign: call)
-                ?? record.map { UserEntry(record: $0) } ?? UserEntry(callSign: call, name: "")
+        // Persist a nickname typed here; the rest of the row is what the
+        // directory already holds, so its notes are kept.
+        if !nickname.isEmpty, nickname != entry.nickname {
             entry.nickname = nickname
-            try? storeOperator(entry, isNew: known == nil)
+            try? storeOperator(entry)
         }
 
-        let stored = userDatabase.find(callSign: call)
+        // Fields with nothing in them fall back to the host station's location.
         let checkIn = CheckIn.sharingStation(
             callSign: call,
-            record: record ?? stored?.record,
-            nickname: effectiveNickname,
-            persistentNotes: stored?.persistentNotes ?? "",
+            record: entry.record,
+            nickname: entry.nickname,
+            persistentNotes: entry.persistentNotes,
             fallbackCity: fallback.city,
             fallbackCounty: fallback.county,
             fallbackState: fallback.state)
