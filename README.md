@@ -219,12 +219,14 @@ image, tag, and a published GitHub release with the image attached:
 ```bash
 bash scripts/release.sh 1.2.0
 bash scripts/release.sh 1.2.0 --dry-run              # check and build, publish nothing
-bash scripts/release.sh 1.2.0 --notes-file notes.md  # hand-written release notes
+bash scripts/release.sh 1.2.0 --notes-file notes.md  # hand-written "What's new"
 ```
 
 It refuses to publish from a dirty tree, an out-of-sync branch, a failing test
 run, or a version that already has a tag or release, and it only pushes the tag
-once the image has built. Without `--notes-file` it generates notes from the
+once the image has built. Because release tags are immutable (see *Security &
+privacy notes*), a pushed tag can't be deleted to start over, so every check
+runs first. Without `--notes-file` it generates notes from the
 commit subjects since the previous tag, with the install, Gatekeeper, and
 checksum sections filled in automatically. Requires the
 [GitHub CLI](https://cli.github.com) (`gh auth login` once).
@@ -322,6 +324,22 @@ After that:
   the expected table and columns — so a crafted or mismatched file is rejected
   with your existing data intact. Values that arrive this way are re-clamped on
   read rather than trusted.
+- **Shared data folders are treated as untrusted too.** The databases are
+  refused if they carry triggers or views, or if a symlink stands in for the
+  file. Reports are created with exclusive-create semantics, so they never
+  overwrite an existing file or write through a link planted at the next
+  report name. A taken name gets a numbered sibling (`…-2.pdf`).
+- **Lookup results stay off disk** except in your operator directory. QRZ is
+  queried through an ephemeral network session with no cache or cookies, and
+  oversized replies are refused before parsing.
+- **The app is signed with the hardened runtime**, which blocks injected
+  libraries and debuggers from reaching the QRZ password in memory.
+- **Release tags are immutable.** A repository ruleset blocks moving or
+  deleting `v*` tags, and `main` can't be force-pushed or deleted, so a
+  published release can't be silently rewritten. Each release lists its disk
+  image's SHA-256.
+- **Reporting a vulnerability:** see [SECURITY.md](SECURITY.md). Use GitHub's
+  private reporting, not a public issue.
 - **Your data never enters this repository.** `.gitignore` excludes the
   databases, PDFs, and any `*.csv` — those hold real names, addresses, and call
   signs of net participants. Example data in the source and tests uses the

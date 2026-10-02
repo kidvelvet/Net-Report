@@ -21,12 +21,13 @@
 #
 #   bash scripts/release.sh 1.2.0
 #   bash scripts/release.sh 1.2.0 --dry-run              # check only, publish nothing
-#   bash scripts/release.sh 1.2.0 --notes-file notes.md  # hand-written notes
+#   bash scripts/release.sh 1.2.0 --notes-file notes.md  # hand-written "What's new"
 #
 # Everything that can fail is checked *before* anything is published, and the
 # tag is only pushed once the image has been built successfully.
 set -euo pipefail
 
+CALLER_DIR="$PWD"   # relative paths given on the command line are relative to here
 PROJ="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJ"
 
@@ -41,8 +42,9 @@ Usage: bash scripts/release.sh <version> [--dry-run] [--notes-file FILE]
 
   <version>           semantic version without the leading v, e.g. 1.2.0
   --dry-run           run every check and build the image, but publish nothing
-  --notes-file FILE   use FILE as the release notes body instead of generating
-                      them from the commits since the previous tag
+  --notes-file FILE   use FILE as the "What's new" section instead of the commit
+                      subjects since the previous tag; the install, first-launch
+                      and checksum sections are still generated around it
 USAGE
 }
 
@@ -53,7 +55,9 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help)    usage; exit 0 ;;
         --dry-run)    DRY_RUN=1; shift ;;
-        --notes-file) NOTES_FILE="${2:-}"; [ -n "$NOTES_FILE" ] || die "--notes-file needs a path"; shift 2 ;;
+        --notes-file) NOTES_FILE="${2:-}"; [ -n "$NOTES_FILE" ] || die "--notes-file needs a path"
+                      case "$NOTES_FILE" in /*) ;; *) NOTES_FILE="$CALLER_DIR/$NOTES_FILE" ;; esac
+                      shift 2 ;;
         -*)           die "unknown option: $1" ;;
         *)            [ -z "$VERSION" ] || die "version given twice: $VERSION and $1"
                       VERSION="$1"; shift ;;
@@ -118,59 +122,59 @@ ok "$(basename "$DMG") ($(du -h "$DMG" | awk '{print $1}'))"
 ok "sha256 $SHA"
 
 # ---------------------------------------------------------------------------
-# 3. Release notes. The install and Gatekeeper sections are mechanical and must
-#    always be present; "what's new" defaults to the commit subjects.
+# 3. Release notes. The install, Gatekeeper and checksum sections are mechanical
+#    and always generated — the checksum can't be known until the image exists —
+#    so a notes file supplies only "What's new" (default: the commit subjects).
 # ---------------------------------------------------------------------------
 PREV_TAG="$(git describe --tags --abbrev=0 2>/dev/null || true)"
 NOTES="$(mktemp)"
 trap 'rm -f "$NOTES"' EXIT
 
-if [ -n "$NOTES_FILE" ]; then
-    cp "$NOTES_FILE" "$NOTES"
-else
-    {
-        echo "Download \`NetReport-$VERSION.dmg\` below, open it, and drag **NetReport.app** onto the **Applications** shortcut."
+{
+    echo "Download \`NetReport-$VERSION.dmg\` below, open it, and drag **NetReport.app** onto the **Applications** shortcut."
+    echo
+    echo "Requires **macOS 14 (Sonoma) or later** on **Apple Silicon**. Upgrading replaces the app only — your databases, reports, and QRZ login are untouched."
+    echo
+    echo "## What's new"
+    echo
+    if [ -n "$NOTES_FILE" ]; then
+        cat "$NOTES_FILE"
         echo
-        echo "Requires **macOS 14 (Sonoma) or later** on **Apple Silicon**. Upgrading replaces the app only — your databases, reports, and QRZ login are untouched."
+    elif [ -n "$PREV_TAG" ]; then
+        git log "$PREV_TAG..HEAD" --no-merges --pretty=format:'- %s'
         echo
-        echo "## What's new"
+    else
+        echo "- First release."
+    fi
+    echo
+    echo "## ⚠️ First launch"
+    echo
+    echo "macOS will say *\"NetReport.app cannot be opened because the developer cannot be verified.\"* This is expected: the app is open source and ad-hoc signed rather than signed with a paid Apple Developer ID. Nothing is wrong with your download."
+    echo
+    echo "1. Install it to **Applications** first (opening straight from the disk image won't work)."
+    echo "2. **Right-click** (or Control-click) **NetReport.app** → **Open**."
+    echo "3. Click **Open** in the dialog."
+    echo
+    echo "Once only. Command-line equivalent:"
+    echo
+    echo '```bash'
+    echo "xattr -d com.apple.quarantine /Applications/NetReport.app"
+    echo '```'
+    echo
+    echo "## Verify your download"
+    echo
+    echo '```bash'
+    echo "shasum -a 256 NetReport-$VERSION.dmg"
+    echo '```'
+    echo
+    echo '```'
+    echo "$SHA"
+    echo '```'
+    if [ -n "$PREV_TAG" ]; then
         echo
-        if [ -n "$PREV_TAG" ]; then
-            git log "$PREV_TAG..HEAD" --no-merges --pretty=format:'- %s'
-            echo
-        else
-            echo "- First release."
-        fi
-        echo
-        echo "## ⚠️ First launch"
-        echo
-        echo "macOS will say *\"NetReport.app cannot be opened because the developer cannot be verified.\"* This is expected: the app is open source and ad-hoc signed rather than signed with a paid Apple Developer ID. Nothing is wrong with your download."
-        echo
-        echo "1. Install it to **Applications** first (opening straight from the disk image won't work)."
-        echo "2. **Right-click** (or Control-click) **NetReport.app** → **Open**."
-        echo "3. Click **Open** in the dialog."
-        echo
-        echo "Once only. Command-line equivalent:"
-        echo
-        echo '```bash'
-        echo "xattr -d com.apple.quarantine /Applications/NetReport.app"
-        echo '```'
-        echo
-        echo "## Verify your download"
-        echo
-        echo '```bash'
-        echo "shasum -a 256 NetReport-$VERSION.dmg"
-        echo '```'
-        echo
-        echo '```'
-        echo "$SHA"
-        echo '```'
-        if [ -n "$PREV_TAG" ]; then
-            echo
-            echo "**Full changelog:** https://github.com/$REPO/compare/$PREV_TAG...$TAG"
-        fi
-    } > "$NOTES"
-fi
+        echo "**Full changelog:** https://github.com/$REPO/compare/$PREV_TAG...$TAG"
+    fi
+} > "$NOTES"
 ok "release notes ready$([ -n "$NOTES_FILE" ] && echo " (from $NOTES_FILE)" || echo " (generated from ${PREV_TAG:-start}..HEAD)")"
 
 if [ "$DRY_RUN" = 1 ]; then
@@ -200,8 +204,9 @@ if ! gh release create "$TAG" \
     die "the release could not be created, but $TAG is already pushed.
        Fix the problem and re-run just the publish step:
          gh release create $TAG \"$DMG\" --title \"Net Report $VERSION\" --verify-tag --latest
-       Or remove the tag to start over:
-         git push origin :refs/tags/$TAG && git tag -d $TAG"
+       The tag cannot simply be deleted: the repository's \"Immutable release
+       tags\" ruleset blocks moving or deleting v* tags. To start over, disable
+       that ruleset in Settings > Rules, delete the tag, then re-enable it."
 fi
 ok "release created"
 
